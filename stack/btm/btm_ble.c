@@ -31,14 +31,15 @@
 #include "btm_int.h"
 #include "btm_ble_api.h"
 #include "smp_api.h"
+#include "l2c_int.h"
+#include "gap_api.h"
 
 #if SMP_INCLUDED == TRUE
 extern BOOLEAN AES_CMAC ( BT_OCTET16 key, UINT8 *input, UINT16 length, UINT16 tlen, UINT8 *p_signature);
 extern void smp_link_encrypted(BD_ADDR bda, UINT8 encr_enable);
 extern BOOLEAN smp_proc_ltk_request(BD_ADDR bda);
 #endif
-
-static void btm_ble_update_active_bgconn_scan_params(void);
+extern void gatt_notify_enc_cmpl(BD_ADDR bd_addr);
 
 /*******************************************************************************/
 /* External Function to be called by other modules                             */
@@ -114,7 +115,7 @@ BOOLEAN BTM_SecAddBleDevice (BD_ADDR bd_addr, BD_NAME bd_name, tBT_DEVICE_TYPE d
     {
         p_dev_rec->sec_flags |= BTM_SEC_NAME_KNOWN;
         BCM_STRNCPY_S ((char *)p_dev_rec->sec_bd_name, sizeof (p_dev_rec->sec_bd_name),
-            (char *)bd_name, BTM_MAX_REM_BD_NAME_LEN);
+                       (char *)bd_name, BTM_MAX_REM_BD_NAME_LEN);
     }
     p_dev_rec->device_type = dev_type;
     p_dev_rec->ble.ble_addr_type = addr_type;
@@ -158,9 +159,10 @@ BOOLEAN BTM_SecAddBleKey (BD_ADDR bd_addr, tBTM_LE_KEY_VALUE *p_le_key, tBTM_LE_
     p_dev_rec = btm_find_dev (bd_addr);
     if (!p_dev_rec || !p_le_key ||
         (key_type != BTM_LE_KEY_PENC && key_type != BTM_LE_KEY_PID &&
-         key_type != BTM_LE_KEY_PCSRK && key_type != BTM_LE_KEY_LENC))
+         key_type != BTM_LE_KEY_PCSRK && key_type != BTM_LE_KEY_LENC &&
+         key_type != BTM_LE_KEY_LCSRK))
     {
-        BTM_TRACE_WARNING3 ("BTM_SecAddLeKey()  No BT Link Key, Wrong Type, or No Device record \
+        BTM_TRACE_WARNING3 ("BTM_SecAddBleKey()  Wrong Type, or No Device record \
                         for bdaddr: %08x%04x, Type: %d",
                             (bd_addr[0]<<24)+(bd_addr[1]<<16)+(bd_addr[2]<<8)+bd_addr[3],
                             (bd_addr[4]<<8)+bd_addr[5], key_type);
@@ -283,27 +285,84 @@ void BTM_GetDeviceDHK (BT_OCTET16 dhk)
 **
 ** Function         BTM_ReadConnectionAddr
 **
-** Description      This function is called to set the local device random address
+** Description      This function is called to get the local device address information
 **                  .
 **
 ** Returns          void
 **
 *******************************************************************************/
-void BTM_ReadConnectionAddr (BD_ADDR conn_addr)
+void BTM_ReadConnectionAddr (BD_ADDR remote_bda, BD_ADDR local_conn_addr, tBLE_ADDR_TYPE *p_addr_type)
 {
 #if BLE_INCLUDED == TRUE
-    BTM_TRACE_DEBUG0 ("BTM_ReadConnectionAddr");
-    if (btm_cb.ble_ctr_cb.inq_var.own_addr_type == BLE_ADDR_PUBLIC)
+    tACL_CONN       *p_acl = btm_bda_to_acl(remote_bda);
+
+    if (p_acl == NULL)
     {
-        BTM_GetLocalDeviceAddr(conn_addr);
+        BTM_TRACE_ERROR0("No connection exist!");
+        return;
     }
-    else
-    {
-        memcpy (conn_addr, btm_cb.ble_ctr_cb.addr_mgnt_cb.private_addr, BD_ADDR_LEN);
-    }
+    memcpy(local_conn_addr, p_acl->conn_addr, BD_ADDR_LEN);
+    * p_addr_type = p_acl->conn_addr_type;
+
+    BTM_TRACE_DEBUG2 ("BTM_ReadConnectionAddr address type: %d addr: 0x%02x",
+                    p_acl->conn_addr_type, p_acl->conn_addr[0]);
+
+#endif
+}
+/*******************************************************************************
+**
+** Function         BTM_IsBleConnection
+**
+** Description      This function is called to check if the connection handle
+**                  for an LE link
+**
+** Returns          TRUE if connection is LE link, otherwise FALSE.
+**
+*******************************************************************************/
+BOOLEAN BTM_IsBleConnection (UINT16 conn_handle)
+{
+#if (BLE_INCLUDED == TRUE)
+    UINT8                xx;
+    tACL_CONN            *p;
+
+    BTM_TRACE_API1 ("BTM_IsBleConnection: conn_handle: %d", conn_handle);
+
+    xx = btm_handle_to_acl_index (conn_handle);
+    if (xx >= MAX_L2CAP_LINKS)
+        return FALSE;
+
+    p = &btm_cb.acl_db[xx];
+
+    return(p->is_le_link);
+#else
+    return FALSE;
 #endif
 }
 
+/*******************************************************************************
+**
+** Function         BTM_ReadRemoteConnectionAddr
+**
+** Description      This function is read the remote device address currently used
+**                  .
+**
+** Returns          void
+**
+*******************************************************************************/
+BOOLEAN BTM_ReadRemoteConnectionAddr(BD_ADDR pseudo_addr, BD_ADDR conn_addr, tBLE_ADDR_TYPE *p_addr_type)
+{
+    BOOLEAN         st = TRUE;
+#if BLE_INCLUDED == TRUE
+    tBTM_SEC_DEV_REC *p_dev_rec = btm_find_dev(pseudo_addr);
+
+    memcpy(conn_addr, pseudo_addr, BD_ADDR_LEN);
+    if (p_dev_rec != NULL)
+    {
+        *p_addr_type = p_dev_rec->ble.ble_addr_type;
+    }
+#endif
+    return st;
+}
 /*******************************************************************************
 **
 ** Function         BTM_SecurityGrant
@@ -346,6 +405,12 @@ void BTM_BlePasskeyReply (BD_ADDR bd_addr, UINT8 res, UINT32 passkey)
     tBTM_SEC_DEV_REC  *p_dev_rec = btm_find_dev (bd_addr);
     tSMP_STATUS      res_smp = (res == BTM_SUCCESS) ? SMP_SUCCESS : SMP_PASSKEY_ENTRY_FAIL;
 
+    if (p_dev_rec == NULL)
+    {
+        BTM_TRACE_ERROR0("Passkey reply to Unknown device");
+        return;
+    }
+
     p_dev_rec->sec_flags   |= BTM_SEC_LINK_KEY_AUTHED;
     BTM_TRACE_DEBUG0 ("BTM_BlePasskeyReply");
     SMP_PasskeyReply(bd_addr, res_smp, passkey);
@@ -371,6 +436,13 @@ void BTM_BleOobDataReply(BD_ADDR bd_addr, UINT8 res, UINT8 len, UINT8 *p_data)
     tBTM_SEC_DEV_REC  *p_dev_rec = btm_find_dev (bd_addr);
 
     BTM_TRACE_DEBUG0 ("BTM_BleOobDataReply");
+
+    if (p_dev_rec == NULL)
+    {
+        BTM_TRACE_ERROR0("BTM_BleOobDataReply() to Unknown device");
+        return;
+    }
+
     p_dev_rec->sec_flags |= BTM_SEC_LINK_KEY_AUTHED;
     SMP_OobDataReply(bd_addr, res_smp, len, p_data);
 #endif
@@ -411,8 +483,10 @@ void BTM_BleSetConnScanParams (UINT16 scan_interval, UINT16 scan_window)
             new_param = TRUE;
         }
 
-        if (new_param)
-            btm_ble_update_active_bgconn_scan_params();
+        if (new_param && p_ble_cb->conn_state == BLE_BG_CONN)
+        {
+            btm_ble_suspend_bg_conn();
+        }
     }
     else
     {
@@ -452,7 +526,7 @@ void BTM_BleSetPrefConnParams (BD_ADDR bd_addr,
     if (BTM_BLE_VALID_PRAM(min_conn_int, BTM_BLE_CONN_INT_MIN, BTM_BLE_CONN_INT_MAX) &&
         BTM_BLE_VALID_PRAM(max_conn_int, BTM_BLE_CONN_INT_MIN, BTM_BLE_CONN_INT_MAX) &&
         BTM_BLE_VALID_PRAM(supervision_tout, BTM_BLE_CONN_SUP_TOUT_MIN, BTM_BLE_CONN_SUP_TOUT_MAX) &&
-        slave_latency <= BTM_BLE_CONN_LATENCY_MAX)
+        (slave_latency <= BTM_BLE_CONN_LATENCY_MAX || slave_latency == BTM_BLE_CONN_PARAM_UNDEF))
     {
         if (p_dev_rec)
         {
@@ -522,8 +596,10 @@ void BTM_ReadDevInfo (BD_ADDR remote_bda, tBT_DEVICE_TYPE *p_dev_type, tBLE_ADDR
         {
             *p_dev_type = p_inq_info->results.device_type ;
             *p_addr_type = p_inq_info->results.ble_addr_type;
+        } else {
+            /* unknown device, assume BR/EDR */
+            BTM_TRACE_DEBUG0 ("btm_find_dev_type - unknown device, BR/EDR assumed");
         }
-        /* unknown device, assume BR/EDR */
     }
     else /* there is a security device record exisitng */
     {
@@ -544,62 +620,138 @@ void BTM_ReadDevInfo (BD_ADDR remote_bda, tBT_DEVICE_TYPE *p_dev_type, tBLE_ADDR
     return;
 }
 
+#if BLE_INCLUDED == TRUE
+
+/*******************************************************************************
+**
+** Function         BTM_BleReceiverTest
+**
+** Description      This function is called to start the LE Receiver test
+**
+** Parameter       rx_freq - Frequency Range
+**               p_cmd_cmpl_cback - Command Complete callback
+**
+*******************************************************************************/
+void BTM_BleReceiverTest(UINT8 rx_freq, tBTM_CMPL_CB *p_cmd_cmpl_cback)
+{
+     btm_cb.devcb.p_le_test_cmd_cmpl_cb = p_cmd_cmpl_cback;
+
+     if (btsnd_hcic_ble_receiver_test(rx_freq) == FALSE)
+     {
+          BTM_TRACE_ERROR1("%s: Unable to Trigger LE receiver test", __FUNCTION__);
+     }
+}
+
+/*******************************************************************************
+**
+** Function         BTM_BleTransmitterTest
+**
+** Description      This function is called to start the LE Transmitter test
+**
+** Parameter       tx_freq - Frequency Range
+**                       test_data_len - Length in bytes of payload data in each packet
+**                       packet_payload - Pattern to use in the payload
+**                       p_cmd_cmpl_cback - Command Complete callback
+**
+*******************************************************************************/
+void BTM_BleTransmitterTest(UINT8 tx_freq, UINT8 test_data_len,
+                                 UINT8 packet_payload, tBTM_CMPL_CB *p_cmd_cmpl_cback)
+{
+     btm_cb.devcb.p_le_test_cmd_cmpl_cb = p_cmd_cmpl_cback;
+     if (btsnd_hcic_ble_transmitter_test(tx_freq, test_data_len, packet_payload) == FALSE)
+     {
+          BTM_TRACE_ERROR1("%s: Unable to Trigger LE transmitter test", __FUNCTION__);
+     }
+}
+
+/*******************************************************************************
+**
+** Function         BTM_BleTestEnd
+**
+** Description      This function is called to stop the in-progress TX or RX test
+**
+** Parameter       p_cmd_cmpl_cback - Command complete callback
+**
+*******************************************************************************/
+void BTM_BleTestEnd(tBTM_CMPL_CB *p_cmd_cmpl_cback)
+{
+     btm_cb.devcb.p_le_test_cmd_cmpl_cb = p_cmd_cmpl_cback;
+
+     if (btsnd_hcic_ble_test_end() == FALSE)
+     {
+          BTM_TRACE_ERROR1("%s: Unable to End the LE TX/RX test", __FUNCTION__);
+     }
+}
+
+#endif
 
 /*******************************************************************************
 ** Internal Functions
 *******************************************************************************/
 #if BLE_INCLUDED == TRUE
 
-/*******************************************************************************
-**
-** Function         btm_ble_update_active_bgconn_scan_params
-**
-** Description      This function is called to update the scan parameter if background
-**                  connection has been active.
-**
-*******************************************************************************/
-static void btm_ble_update_active_bgconn_scan_params(void)
+void btm_ble_test_command_complete(UINT8 *p)
 {
-    tBTM_BLE_CB *p_cb = &btm_cb.ble_ctr_cb;
-    tBTM_BLE_SEL_CBACK   *p_select_cback;
+    tBTM_CMPL_CB   *p_cb = btm_cb.devcb.p_le_test_cmd_cmpl_cb;
+    UINT8           status;
 
-    /* if active , cancel and restart and apply the params */
-    if (p_cb->bg_conn_state == BLE_BG_CONN_ACTIVE)
+    btm_cb.devcb.p_le_test_cmd_cmpl_cb = NULL;
+
+    if (p_cb)
     {
-        if (p_cb->bg_conn_type == BTM_BLE_CONN_AUTO)
-        {
-            if (btm_ble_start_auto_conn(FALSE))
-                btm_ble_start_auto_conn(TRUE);
-        }
-        else if (p_cb->bg_conn_type == BTM_BLE_CONN_SELECTIVE)
-        {
-            p_select_cback = p_cb->p_select_cback;
-            if (btm_ble_start_select_conn(FALSE, NULL))
-                btm_ble_start_select_conn(TRUE, p_select_cback);
-        }
+        (*p_cb)(p);
     }
-    return;
 }
 
 /*******************************************************************************
 **
-** Function         btm_ble_check_link_type
+** Function         BTM_IsBleLink
 **
 ** Description      This function is to check the link type is BLE or BR/EDR.
 **
 ** Returns          TRUE if BLE link; FALSE if BR/EDR.
 **
 *******************************************************************************/
-BOOLEAN btm_ble_check_link_type (BD_ADDR bd_addr)
+BOOLEAN BTM_IsBleLink (BD_ADDR bd_addr)
 {
+#if (BLE_INCLUDED == TRUE)
     tACL_CONN         *p;
-    BTM_TRACE_DEBUG0 ("btm_ble_check_link_type");
+    BTM_TRACE_DEBUG0 ("BTM_IsBleLink");
     if ((p = btm_bda_to_acl(bd_addr)) != NULL)
         return p->is_le_link;
     else
+#endif
         return FALSE;
 }
+/*******************************************************************************
+**
+** Function         BTM_UseLeLink
+**
+** Description      This function is to select the underneath physical link to use.
+**
+** Returns          TRUE to use LE, FALSE use BR/EDR.
+**
+*******************************************************************************/
+BOOLEAN BTM_UseLeLink (BD_ADDR bd_addr)
+{
+    tACL_CONN         *p;
+    tBT_DEVICE_TYPE     dev_type;
+    tBLE_ADDR_TYPE      addr_type;
+    BOOLEAN             use_le = FALSE;
 
+    if ((p = btm_bda_to_acl(bd_addr)) != NULL)
+    {
+#if (BLE_INCLUDED == TRUE)
+        use_le = (p->is_le_link);
+#endif
+    }
+    else
+    {
+        BTM_ReadDevInfo(bd_addr, &dev_type, &addr_type);
+        use_le = (dev_type == BT_DEVICE_TYPE_BLE);
+    }
+    return use_le;
+}
 /*******************************************************************************
 **
 ** Function         btm_ble_rand_enc_complete
@@ -643,7 +795,7 @@ void btm_ble_rand_enc_complete (UINT8 *p, UINT16 op_code, tBTM_RAND_ENC_CB *p_en
 }
 
 
-#if (SMP_INCLUDED == TRUE)
+    #if (SMP_INCLUDED == TRUE)
 
 /*******************************************************************************
 **
@@ -744,6 +896,7 @@ void btm_sec_save_le_key(BD_ADDR bd_addr, tBTM_LE_KEY_TYPE key_type, tBTM_LE_KEY
 {
     tBTM_SEC_DEV_REC *p_rec;
     tBTM_LE_EVT_DATA    cb_data;
+    UINT8 i;
 
     BTM_TRACE_DEBUG2 ("btm_sec_save_le_key key_type=0x%x pass_to_application=%d",key_type, pass_to_application);
     /* Store the updated key in the device database */
@@ -776,7 +929,14 @@ void btm_sec_save_le_key(BD_ADDR bd_addr, tBTM_LE_KEY_TYPE key_type, tBTM_LE_KEY
                 break;
 
             case BTM_LE_KEY_PID:
-                memcpy(p_rec->ble.keys.irk, p_keys->pid_key, BT_OCTET16_LEN);
+                for (i=0; i<BT_OCTET16_LEN; i++)
+                {
+                    p_rec->ble.keys.irk[i] = p_keys->pid_key.irk[i];
+                }
+
+                 //memcpy( p_rec->ble.keys.irk, p_keys->pid_key, BT_OCTET16_LEN); todo will crash the system
+                memcpy(p_rec->ble.static_addr, p_keys->pid_key.static_addr, BD_ADDR_LEN);
+                p_rec->ble.static_addr_type = p_keys->pid_key.addr_type;
                 p_rec->ble.key_type |= BTM_LE_KEY_PID;
                 BTM_TRACE_DEBUG1("BTM_LE_KEY_PID key_type=0x%x save peer IRK",  p_rec->ble.key_type);
                 break;
@@ -839,7 +999,6 @@ void btm_sec_save_le_key(BD_ADDR bd_addr, tBTM_LE_KEY_TYPE key_type, tBTM_LE_KEY
         {
             cb_data.key.p_key_value = p_keys;
             cb_data.key.key_type = key_type;
-
             (*btm_cb.api.p_le_callback) (BTM_LE_KEY_EVT, bd_addr, &cb_data);
         }
         return;
@@ -909,7 +1068,7 @@ UINT8 btm_ble_read_sec_key_size(BD_ADDR bd_addr)
 void btm_ble_link_sec_check(BD_ADDR bd_addr, tBTM_LE_AUTH_REQ auth_req, tBTM_BLE_SEC_REQ_ACT *p_sec_req_act)
 {
     tBTM_SEC_DEV_REC *p_dev_rec = btm_find_dev (bd_addr);
-    UINT8 req_sec_level, cur_sec_level;
+    UINT8 req_sec_level = BTM_LE_SEC_NONE, cur_sec_level = BTM_LE_SEC_NONE;
 
     BTM_TRACE_DEBUG1 ("btm_ble_link_sec_check auth_req =0x%x", auth_req);
 
@@ -919,7 +1078,8 @@ void btm_ble_link_sec_check(BD_ADDR bd_addr, tBTM_LE_AUTH_REQ auth_req, tBTM_BLE
         return;
     }
 
-    if (p_dev_rec->sec_state == BTM_SEC_STATE_ENCRYPTING)
+    if (p_dev_rec->sec_state == BTM_SEC_STATE_ENCRYPTING ||
+        p_dev_rec->sec_state == BTM_SEC_STATE_AUTHENTICATING)
     {
         /* race condition: discard the security request while master is encrypting the link */
         *p_sec_req_act = BTM_BLE_SEC_REQ_ACT_DISCARD;
@@ -960,12 +1120,13 @@ void btm_ble_link_sec_check(BD_ADDR bd_addr, tBTM_LE_AUTH_REQ auth_req, tBTM_BLE
             }
             else
             {
-                /* To avoid re-encryption on an encrypted link for an equal condition encryption
+                /* To avoid re-encryption on an encrypted link for an equal condition encryption */
+                /* if link has been encrypted, do nothing, go straight to furhter action
                 if (p_dev_rec->sec_flags & BTM_SEC_ENCRYPTED)
                     *p_sec_req_act = BTM_BLE_SEC_REQ_ACT_DISCARD;
                 else
                 */
-                    *p_sec_req_act = BTM_BLE_SEC_REQ_ACT_ENCRYPT;
+                *p_sec_req_act = BTM_BLE_SEC_REQ_ACT_ENCRYPT;
             }
         }
         else
@@ -1000,12 +1161,13 @@ tBTM_STATUS btm_ble_set_encryption (BD_ADDR bd_addr, void *p_ref_data, UINT8 lin
     tBTM_BLE_SEC_ACT    sec_act = *(tBTM_BLE_SEC_ACT *)p_ref_data ;
     tBTM_SEC_DEV_REC    *p_rec = btm_find_dev (bd_addr);
 
-    BTM_TRACE_DEBUG2 ("btm_ble_set_encryption sec_act=0x%x role_master=%d", sec_act, p_rec->role_master);
-
     if (p_rec == NULL)
     {
+        BTM_TRACE_WARNING1 ("btm_ble_set_encryption (NULL device record!! sec_act=0x%x", sec_act);
         return(BTM_WRONG_MODE);
     }
+
+    BTM_TRACE_DEBUG2 ("btm_ble_set_encryption sec_act=0x%x role_master=%d", sec_act, p_rec->role_master);
 
     if (sec_act == BTM_BLE_SEC_ENCRYPT_MITM)
     {
@@ -1017,10 +1179,18 @@ tBTM_STATUS btm_ble_set_encryption (BD_ADDR bd_addr, void *p_ref_data, UINT8 lin
         case BTM_BLE_SEC_ENCRYPT:
             if (link_role == BTM_ROLE_MASTER)
             {
-                /* start link layer encryption using the security info stored */
-                btm_ble_start_encrypt(bd_addr, FALSE, NULL);
-                p_rec->sec_state = BTM_SEC_STATE_ENCRYPTING;
-                cmd = BTM_CMD_STARTED;
+                if(p_rec->sec_state == BTM_SEC_STATE_ENCRYPTING) {
+                    BTM_TRACE_DEBUG0 ("State is already encrypting::");
+                    cmd = BTM_CMD_STARTED;
+                }
+                else {
+                    /* start link layer encryption using the security info stored */
+                    if (btm_ble_start_encrypt(bd_addr, FALSE, NULL))
+                    {
+                        p_rec->sec_state = BTM_SEC_STATE_ENCRYPTING;
+                        cmd = BTM_CMD_STARTED;
+                    }
+                }
                 break;
             }
             /* if salve role then fall through to call SMP_Pair below which will send a
@@ -1065,9 +1235,11 @@ void btm_ble_ltk_request(UINT16 handle, UINT8 rand[8], UINT16 ediv)
 
     memcpy(p_cb->enc_rand, rand, BT_OCTET8_LEN);
 
-    if (!smp_proc_ltk_request(p_dev_rec->bd_addr))
-        btm_ble_ltk_request_reply(p_dev_rec->bd_addr, FALSE, dummy_stk);
-
+    if (p_dev_rec != NULL)
+    {
+        if (!smp_proc_ltk_request(p_dev_rec->bd_addr))
+            btm_ble_ltk_request_reply(p_dev_rec->bd_addr, FALSE, dummy_stk);
+    }
 
 }
 
@@ -1086,6 +1258,7 @@ BOOLEAN btm_ble_start_encrypt(BD_ADDR bda, BOOLEAN use_stk, BT_OCTET16 stk)
     tBTM_CB *p_cb = &btm_cb;
     tBTM_SEC_DEV_REC    *p_rec = btm_find_dev (bda);
     BT_OCTET8    dummy_rand = {0};
+    BOOLEAN     rt = FALSE;
 
     BTM_TRACE_DEBUG0 ("btm_ble_start_encrypt");
 
@@ -1093,22 +1266,30 @@ BOOLEAN btm_ble_start_encrypt(BD_ADDR bda, BOOLEAN use_stk, BT_OCTET16 stk)
         (p_rec && p_rec->sec_state == BTM_SEC_STATE_ENCRYPTING))
         return FALSE;
 
-    if (p_rec->sec_state == BTM_SEC_STATE_IDLE)
-        p_rec->sec_state = BTM_SEC_STATE_ENCRYPTING;
     p_cb->enc_handle = p_rec->hci_handle;
 
     if (use_stk)
     {
-        if (!btsnd_hcic_ble_start_enc(p_rec->hci_handle, dummy_rand, 0, stk))
-            return FALSE;
+        if (btsnd_hcic_ble_start_enc(p_rec->hci_handle, dummy_rand, 0, stk))
+            rt = TRUE;
+    }
+    else if (p_rec->ble.key_type & BTM_LE_KEY_PENC)
+    {
+        if (btsnd_hcic_ble_start_enc(p_rec->hci_handle, p_rec->ble.keys.rand,
+                                      p_rec->ble.keys.ediv, p_rec->ble.keys.ltk))
+            rt = TRUE;
     }
     else
     {
-        if (!btsnd_hcic_ble_start_enc(p_rec->hci_handle, p_rec->ble.keys.rand,
-                                      p_rec->ble.keys.ediv, p_rec->ble.keys.ltk))
-            return FALSE;
+        BTM_TRACE_ERROR0("No key available to encrypt the link");
     }
-    return TRUE;
+    if (rt)
+    {
+        if (p_rec->sec_state == BTM_SEC_STATE_IDLE)
+            p_rec->sec_state = BTM_SEC_STATE_ENCRYPTING;
+    }
+
+    return rt;
 }
 
 /*******************************************************************************
@@ -1123,31 +1304,81 @@ BOOLEAN btm_ble_start_encrypt(BD_ADDR bda, BOOLEAN use_stk, BT_OCTET16 stk)
 void btm_ble_link_encrypted(BD_ADDR bd_addr, UINT8 encr_enable)
 {
     tBTM_SEC_DEV_REC    *p_dev_rec = btm_find_dev (bd_addr);
+    BOOLEAN             enc_cback;
+
+    if (!p_dev_rec)
+    {
+        BTM_TRACE_WARNING1 ("btm_ble_link_encrypted (No Device Found!) encr_enable=%d", encr_enable);
+        return;
+    }
 
     BTM_TRACE_DEBUG1 ("btm_ble_link_encrypted encr_enable=%d", encr_enable);
 
+    enc_cback = (p_dev_rec->sec_state == BTM_SEC_STATE_ENCRYPTING);
+
     smp_link_encrypted(bd_addr, encr_enable);
 
-    if (p_dev_rec)
+    BTM_TRACE_DEBUG1(" p_dev_rec->sec_flags=0x%x", p_dev_rec->sec_flags);
+
+    if (encr_enable && p_dev_rec->enc_key_size == 0)
+        p_dev_rec->enc_key_size = p_dev_rec->ble.keys.key_size;
+
+    p_dev_rec->sec_state = BTM_SEC_STATE_IDLE;
+    if (p_dev_rec->p_callback && enc_cback)
     {
-        BTM_TRACE_DEBUG1(" p_dev_rec->sec_flags=0x%x", p_dev_rec->sec_flags);
+        if (encr_enable)
+            btm_sec_dev_rec_cback_event(p_dev_rec, BTM_SUCCESS);
+        else if (p_dev_rec->role_master)
+            btm_sec_dev_rec_cback_event(p_dev_rec, BTM_ERR_PROCESSING);
 
-        if (encr_enable && p_dev_rec->enc_key_size == 0)
-            p_dev_rec->enc_key_size = p_dev_rec->ble.keys.key_size;
-
-        if (p_dev_rec->p_callback)
-        {
-            if (p_dev_rec->sec_state == BTM_SEC_STATE_ENCRYPTING)
-            {
-                if (encr_enable)
-                    btm_sec_dev_rec_cback_event(p_dev_rec, BTM_SUCCESS);
-                else if (p_dev_rec->role_master)
-                    btm_sec_dev_rec_cback_event(p_dev_rec, BTM_ERR_PROCESSING);
-            }
-        }
-        p_dev_rec->sec_state = BTM_SEC_STATE_IDLE;
     }
+    /* to notify GATT to send data if any request is pending */
+    gatt_notify_enc_cmpl(p_dev_rec->bd_addr);
 }
+
+/*******************************************************************************
+**
+** Function         btm_ble_encryption_failure
+**
+** Description      This function is called when LE link encrption status is changed.
+**
+** Returns          void
+**
+*******************************************************************************/
+void btm_ble_encryption_failure(BD_ADDR bd_addr,UINT8 status)
+{
+    tBTM_SEC_DEV_REC    *p_dev_rec = btm_find_dev (bd_addr);
+    BOOLEAN             enc_cback;
+
+    if (!p_dev_rec)
+    {
+        BTM_TRACE_WARNING1 ("btm_ble_encryption_failure (No Device Found!) status=%d", status);
+        return;
+    }
+
+    BTM_TRACE_DEBUG1 ("btm_ble_encryption_failure status=%d", status);
+
+    enc_cback = (p_dev_rec->sec_state == BTM_SEC_STATE_ENCRYPTING);
+
+    smp_link_encrypted(bd_addr, 0);//encr_enable=0
+
+    BTM_TRACE_DEBUG1(" p_dev_rec->sec_flags=0x%x", p_dev_rec->sec_flags);
+
+    p_dev_rec->sec_state = BTM_SEC_STATE_IDLE;
+    if (p_dev_rec->p_callback && enc_cback && p_dev_rec->role_master)
+    {
+        if (status==HCI_ERR_CONN_FAILED_ESTABLISHMENT)
+            btm_sec_dev_rec_cback_event(p_dev_rec, BTM_BAD_RF);
+        else if (status == BTM_DEVICE_TIMEOUT)
+            btm_sec_dev_rec_cback_event(p_dev_rec, BTM_DEVICE_TIMEOUT);
+        else
+            btm_sec_dev_rec_cback_event(p_dev_rec, BTM_ERR_PROCESSING);
+
+    }
+    /* to notify GATT to send data if any request is pending */
+    gatt_notify_enc_cmpl(p_dev_rec->bd_addr);
+}
+
 
 /*******************************************************************************
 ** Function         btm_enc_proc_ltk
@@ -1186,7 +1417,7 @@ static void btm_enc_proc_slave_y(tSMP_ENC *p)
         p_dev_rec = btm_find_dev_by_handle (p_cb->enc_handle);
 
         if ( p_dev_rec &&
-            p_dev_rec->ble.keys.div == div )
+             p_dev_rec->ble.keys.div == div )
         {
             BTM_TRACE_DEBUG0 ("LTK request OK");
             /* calculating LTK , LTK = E er(div) */
@@ -1305,6 +1536,134 @@ UINT8 btm_ble_io_capabilities_req(tBTM_SEC_DEV_REC *p_dev_rec, tBTM_LE_IO_REQ *p
     return callback_rc;
 }
 
+/*******************************************************************************
+**
+** Function         btm_ble_connected
+**
+** Description      This function is when a LE connection to the peer device is
+**                  establsihed
+**
+** Returns          void
+**
+*******************************************************************************/
+void btm_ble_connected (UINT8 *bda, UINT16 handle, UINT8 enc_mode, UINT8 role,
+                        tBLE_ADDR_TYPE addr_type, BOOLEAN addr_matched)
+{
+    tBTM_SEC_DEV_REC *p_dev_rec = btm_find_dev (bda);
+    tBTM_BLE_CB *p_cb = &btm_cb.ble_ctr_cb;
+
+    BTM_TRACE_EVENT0 ("btm_ble_connected");
+
+    /* Commenting out trace due to obf/compilation problems.
+    */
+#if (BT_USE_TRACES == TRUE)
+    if (p_dev_rec)
+    {
+        BTM_TRACE_EVENT4 ("Security Manager: btm_sec_connected :  handle:%d  enc_mode:%d  bda:%x RName:%s",
+                          handle,  enc_mode,
+                          (bda[2]<<24)+(bda[3]<<16)+(bda[4]<<8)+bda[5],
+                          p_dev_rec->sec_bd_name);
+
+        BTM_TRACE_DEBUG1 ("btm_ble_connected sec_flags=0x%x",p_dev_rec->sec_flags);
+    }
+    else
+    {
+        BTM_TRACE_EVENT3 ("Security Manager: btm_sec_connected:   handle:%d  enc_mode:%d  bda:%x ",
+                          handle,  enc_mode,
+                          (bda[2]<<24)+(bda[3]<<16)+(bda[4]<<8)+bda[5]);
+    }
+#endif
+
+    if (!p_dev_rec)
+    {
+        /* There is no device record for new connection.  Allocate one */
+        p_dev_rec = btm_sec_alloc_dev (bda);
+    }
+    else    /* Update the timestamp for this device */
+    {
+        p_dev_rec->timestamp = btm_cb.dev_rec_count++;
+    }
+
+    /* update device information */
+    p_dev_rec->device_type |= BT_DEVICE_TYPE_BLE;
+    p_dev_rec->hci_handle = handle;
+    p_dev_rec->ble.ble_addr_type = addr_type;
+
+    if (role == HCI_ROLE_MASTER)
+        p_dev_rec->role_master = TRUE;
+
+    if (role == HCI_ROLE_SLAVE)
+        p_cb->inq_var.adv_mode  = BTM_BLE_ADV_DISABLE;
+    p_cb->inq_var.directed_conn = FALSE;
+
+    return;
+}
+
+/*****************************************************************************
+**  Function        btm_ble_conn_complete
+**
+**  Description     LE connection complete.
+**
+******************************************************************************/
+void btm_ble_conn_complete(UINT8 *p, UINT16 evt_len)
+{
+    UINT8       role, status, bda_type;
+    UINT16      handle;
+    BD_ADDR     bda;
+    UINT16      conn_interval, conn_latency, conn_timeout;
+    BOOLEAN     match = FALSE;
+
+    STREAM_TO_UINT8   (status, p);
+    STREAM_TO_UINT16   (handle, p);
+    STREAM_TO_UINT8    (role, p);
+    STREAM_TO_UINT8    (bda_type, p);
+    STREAM_TO_BDADDR   (bda, p);
+
+    if (status == 0)
+    {
+        STREAM_TO_UINT16   (conn_interval, p);
+        STREAM_TO_UINT16   (conn_latency, p);
+        STREAM_TO_UINT16   (conn_timeout, p);
+        handle = HCID_GET_HANDLE (handle);
+
+        btm_ble_connected(bda, handle, HCI_ENCRYPT_MODE_DISABLED, role, bda_type, match);
+        l2cble_conn_comp (handle, role, bda, bda_type, conn_interval,
+                              conn_latency, conn_timeout);
+    }
+    else
+    {
+        role = HCI_ROLE_UNKNOWN;
+
+        if (status == HCI_ERR_DIRECTED_ADVERTISING_TIMEOUT)
+        {
+            btm_ble_dir_adv_tout();
+        }
+        /* this is to work around broadcom firmware problem to handle
+         * unsolicited command complete event for HCI_LE_Create_Connection_Cancel
+         * and LE connection complete event with status error code (0x2)
+         * unknown connection identifier from bluetooth controller
+         * the workaround is to release the HCI connection to avoid out of sync
+         * with bluetooth controller, which cause BT can't be turned off.
+        */
+        else if ((status == HCI_ERR_NO_CONNECTION) &&
+                 (btm_ble_get_conn_st() != BLE_CONN_CANCEL))
+        {
+            tL2C_LCB    *p_lcb;
+            handle = HCID_GET_HANDLE (handle);
+            p_lcb = l2cu_find_lcb_by_handle (handle);
+            if (p_lcb != NULL)
+            {
+                l2c_link_hci_disc_comp (handle, HCI_ERR_PEER_USER);
+                btm_sec_disconnected (handle, HCI_ERR_PEER_USER);
+            }
+        }
+    }
+
+    btm_ble_set_conn_st(BLE_CONN_IDLE);
+
+    btm_ble_update_mode_operation(role, bda, TRUE);
+}
+
 /*****************************************************************************
 **  Function        btm_proc_smp_cback
 **
@@ -1314,7 +1673,7 @@ UINT8 btm_ble_io_capabilities_req(tBTM_SEC_DEV_REC *p_dev_rec, tBTM_LE_IO_REQ *p
 UINT8 btm_proc_smp_cback(tSMP_EVT event, BD_ADDR bd_addr, tSMP_EVT_DATA *p_data)
 {
     tBTM_SEC_DEV_REC    *p_dev_rec = btm_find_dev (bd_addr);
-    UINT8 res;
+    UINT8 res = 0;
 
     BTM_TRACE_DEBUG1 ("btm_proc_smp_cback event = %d", event);
 
@@ -1331,16 +1690,15 @@ UINT8 btm_proc_smp_cback(tSMP_EVT event, BD_ADDR bd_addr, tSMP_EVT_DATA *p_data)
             case SMP_OOB_REQ_EVT:
                 p_dev_rec->sec_flags |= BTM_SEC_LINK_KEY_AUTHED;
             case SMP_SEC_REQUEST_EVT:
+                memcpy (btm_cb.pairing_bda, bd_addr, BD_ADDR_LEN);
+                p_dev_rec->sec_state = BTM_SEC_STATE_AUTHENTICATING;
+                /* fall through */
             case SMP_COMPLT_EVT:
                 if (btm_cb.api.p_le_callback)
                 {
                     /* the callback function implementation may change the IO capability... */
                     BTM_TRACE_DEBUG1 ("btm_cb.api.p_le_callback=0x%x", btm_cb.api.p_le_callback );
-                    (*btm_cb.api.p_le_callback) (event, bd_addr, (tBTM_LE_EVT_DATA *)p_data);
-                }
-                else
-                {
-                    BTM_TRACE_ERROR0 ("btm_proc_smp_cback: btm_cb.api.p_le_callback ==NULL");
+                   (*btm_cb.api.p_le_callback) (event, bd_addr, (tBTM_LE_EVT_DATA *)p_data);
                 }
 
                 if (event == SMP_COMPLT_EVT)
@@ -1362,7 +1720,7 @@ UINT8 btm_proc_smp_cback(tSMP_EVT event, BD_ADDR bd_addr, tSMP_EVT_DATA *p_data)
 #if BTM_BLE_CONFORMANCE_TESTING == TRUE
                     if (res != BTM_SUCCESS)
                     {
-                        if (!btm_cb.devcb.no_disc_if_pair_fail)
+                        if (!btm_cb.devcb.no_disc_if_pair_fail && p_data->cmplt.reason != SMP_CONN_TOUT)
                         {
                             BTM_TRACE_DEBUG0 ("Pairing failed - Remove ACL");
                             btm_remove_acl(bd_addr);
@@ -1370,11 +1728,11 @@ UINT8 btm_proc_smp_cback(tSMP_EVT event, BD_ADDR bd_addr, tSMP_EVT_DATA *p_data)
                         else
                         {
                             BTM_TRACE_DEBUG0 ("Pairing failed - Not Removing ACL");
-	                        p_dev_rec->sec_state = BTM_SEC_STATE_IDLE;
+                            p_dev_rec->sec_state = BTM_SEC_STATE_IDLE;
                         }
                     }
 #else
-                    if (res != BTM_SUCCESS)
+                    if (res != BTM_SUCCESS && p_data->cmplt.reason != SMP_CONN_TOUT)
                         btm_remove_acl(bd_addr);
 #endif
 
@@ -1387,6 +1745,7 @@ UINT8 btm_proc_smp_cback(tSMP_EVT event, BD_ADDR bd_addr, tSMP_EVT_DATA *p_data)
                                       btm_cb.pairing_bda[3], btm_cb.pairing_bda[4], btm_cb.pairing_bda[5]);
 
                     memset (btm_cb.pairing_bda, 0xff, BD_ADDR_LEN);
+                    btm_cb.pairing_state = BTM_PAIR_STATE_IDLE;
                     btm_cb.pairing_flags = 0;
                 }
                 break;
@@ -1406,7 +1765,7 @@ UINT8 btm_proc_smp_cback(tSMP_EVT event, BD_ADDR bd_addr, tSMP_EVT_DATA *p_data)
     return 0;
 }
 
-#endif  /* SMP_INCLUDED */
+    #endif  /* SMP_INCLUDED */
 #endif  /* BLE_INCLUDED */
 
 
@@ -1452,6 +1811,7 @@ BOOLEAN BTM_BleDataSignature (BD_ADDR bd_addr, UINT8 *p_text, UINT16 len,
         if ((p_buf = (UINT8 *)GKI_getbuf((UINT16)(len + 4))) != NULL)
         {
             BTM_TRACE_DEBUG0("Start to generate Local CSRK");
+            pp = p_buf;
             /* prepare plain text */
             if (p_text)
             {
@@ -1548,7 +1908,7 @@ BOOLEAN BTM_BleDataSignature (BD_ADDR bd_addr, UINT8 *p_text, UINT16 len,
 **
 *******************************************************************************/
 BOOLEAN BTM_BleVerifySignature (BD_ADDR bd_addr, UINT8 *p_orig, UINT16 len, UINT32 counter,
-                             UINT8 *p_comp)
+                                UINT8 *p_comp)
 {
     BOOLEAN             verified = FALSE;
 #if (BLE_INCLUDED == TRUE && SMP_INCLUDED == TRUE)
@@ -1844,7 +2204,7 @@ void btm_ble_reset_id( void )
     }
 }
 
-#if BTM_BLE_CONFORMANCE_TESTING == TRUE
+    #if BTM_BLE_CONFORMANCE_TESTING == TRUE
 /*******************************************************************************
 **
 ** Function         btm_ble_set_no_disc_if_pair_fail
@@ -1894,6 +2254,33 @@ void btm_ble_set_test_local_sign_cntr_value(BOOLEAN enable, UINT32 test_local_si
     btm_cb.devcb.test_local_sign_cntr =  test_local_sign_cntr;
 }
 
+/*******************************************************************************
+**
+** Function         btm_set_random_address
+**
+** Description      This function set a random address to local controller.
+**
+** Returns          void
+**
+*******************************************************************************/
+void btm_set_random_address(BD_ADDR random_bda)
+{
+    tBTM_LE_RANDOM_CB *p_cb = &btm_cb.ble_ctr_cb.addr_mgnt_cb;
+    BOOLEAN     adv_mode = btm_cb.ble_ctr_cb.inq_var.adv_mode ;
+
+    BTM_TRACE_DEBUG0 ("btm_set_random_address");
+
+    if (adv_mode  == BTM_BLE_ADV_ENABLE)
+        btsnd_hcic_ble_set_adv_enable (BTM_BLE_ADV_DISABLE);
+
+    memcpy(p_cb->private_addr, random_bda, BD_ADDR_LEN);
+    btsnd_hcic_ble_set_random_addr(p_cb->private_addr);
+
+    if (adv_mode  == BTM_BLE_ADV_ENABLE)
+        btsnd_hcic_ble_set_adv_enable (BTM_BLE_ADV_ENABLE);
+
+
+}
 #endif /* BTM_BLE_CONFORMANCE_TESTING */
 
 

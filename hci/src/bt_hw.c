@@ -39,7 +39,11 @@
 ******************************************************************************/
 
 extern tHCI_IF *p_hci_if;
+extern uint8_t fwcfg_acked;
 void lpm_vnd_cback(uint8_t vnd_result);
+#ifdef QCOM_BT_SIBS_ENABLE
+void lpm_vnd_sleep_func(uint8_t vnd_result);
+#endif
 
 /******************************************************************************
 **  Variables
@@ -66,6 +70,8 @@ static void fwcfg_cb(bt_vendor_op_result_t result)
 {
     bt_hc_postload_result_t status = (result == BT_VND_OP_RESULT_SUCCESS) ? \
                                      BT_HC_PRELOAD_SUCCESS : BT_HC_PRELOAD_FAIL;
+
+    fwcfg_acked = TRUE;
 
     if (bt_hc_cbacks)
         bt_hc_cbacks->preload_cb(NULL, status);
@@ -105,6 +111,26 @@ static void lpm_vnd_cb(bt_vendor_op_result_t result)
 
     lpm_vnd_cback(status);
 }
+
+#ifdef QCOM_BT_SIBS_ENABLE
+/******************************************************************************
+**
+** Function         lpm_vnd_set_state_cb
+**
+** Description      HOST/CONTROLLER VENDOR LIB CALLBACK API - This function is
+**                  called back from the libbt-vendor to indicate the stack to
+**                  wake up the BT-Device or to enter into sleep mode.
+**
+** Returns          None
+**
+******************************************************************************/
+static void lpm_vnd_set_state_cb(bt_vendor_lpm_wake_state_t state)
+{
+    uint8_t lpm_state = state;
+
+    lpm_vnd_sleep_func(state);
+}
+#endif
 
 /******************************************************************************
 **
@@ -162,6 +188,22 @@ static uint8_t xmit_cb(uint16_t opcode, void *p_buf, tINT_CMD_CBACK p_cback)
     return p_hci_if->send_int_cmd(opcode, (HC_BT_HDR *)p_buf, p_cback);
 }
 
+/******************************************************************************
+**
+** Function         epilog_cb
+**
+** Description      HOST/CONTROLLER VENDOR LIB CALLBACK API - This function is
+**                  called back from the libbt-vendor to indicate the result of
+**                  previous epilog call.
+**
+** Returns          None
+**
+******************************************************************************/
+static void epilog_cb(bt_vendor_op_result_t result)
+{
+    bthc_signal_event(HC_EVENT_EXIT);
+}
+
 /*****************************************************************************
 **   The libbt-vendor Callback Functions Table
 *****************************************************************************/
@@ -172,7 +214,11 @@ static const bt_vendor_callbacks_t vnd_callbacks = {
     lpm_vnd_cb,
     alloc,
     dealloc,
-    xmit_cb
+    xmit_cb,
+    epilog_cb
+#ifdef QCOM_BT_SIBS_ENABLE
+    ,lpm_vnd_set_state_cb
+#endif
 };
 
 /******************************************************************************

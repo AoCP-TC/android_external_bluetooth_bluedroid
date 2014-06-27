@@ -51,6 +51,8 @@
 #define BTA_AV_ACP_SIG_TIME_VAL 2000
 #endif
 
+/* constant for scb state machine, need to check in avrcp*/
+#define AV_SCB_INIT_STATE 0
 static void bta_av_acp_sig_timer_cback (TIMER_LIST_ENT *p_tle);
 
 /*******************************************************************************
@@ -267,7 +269,13 @@ static void bta_av_rc_msg_cback(UINT8 handle, UINT8 label, UINT8 opcode, tAVRC_M
         p_p_data = &p_msg->pass.p_pass_data;
         data_len = (UINT16) p_msg->pass.pass_len;
     }
-
+    else if (opcode == AVRC_OP_BROWSE && p_msg->browse.p_browse_data != NULL)
+    {
+        APPL_TRACE_EVENT0("bta_av_rc_msg_cback Browse Data");
+        p_data  = p_msg->browse.p_browse_data;
+        p_p_data = &p_msg->browse.p_browse_data;
+        data_len = (UINT16) p_msg->browse.browse_len;
+    }
     if ((p_buf = (tBTA_AV_RC_MSG *) GKI_getbuf((UINT16) (sizeof(tBTA_AV_RC_MSG) + data_len))) != NULL)
     {
         p_buf->hdr.event = BTA_AV_AVRC_MSG_EVT;
@@ -363,7 +371,7 @@ UINT8 bta_av_rc_create(tBTA_AV_CB *p_cb, UINT8 role, UINT8 shdl, UINT8 lidx)
 ** Returns          BTA_AV_RSP_ACCEPT or BTA_AV_RSP_NOT_IMPL.
 **
 *******************************************************************************/
-static tBTA_AV_CODE bta_av_group_navi_supported(UINT8 len, UINT8 *p_data)
+static tBTA_AV_CODE bta_av_group_navi_supported(UINT8 len, UINT8 *p_data, BOOLEAN is_inquiry)
 {
     tBTA_AV_CODE ret=BTA_AV_RSP_NOT_IMPL;
     UINT8 *p_ptr = p_data;
@@ -377,10 +385,18 @@ static tBTA_AV_CODE bta_av_group_navi_supported(UINT8 len, UINT8 *p_data)
 
         if (u32 == AVRC_CO_METADATA)
         {
-            if (u16 <= AVRC_PDU_PREV_GROUP)
-                ret = BTA_AV_RSP_ACCEPT;
+            if (is_inquiry)
+            {
+                if (u16 <= AVRC_PDU_PREV_GROUP)
+                    ret = BTA_AV_RSP_IMPL_STBL;
+            }
             else
-                ret = BTA_AV_RSP_REJ;
+            {
+                if (u16 <= AVRC_PDU_PREV_GROUP)
+                    ret = BTA_AV_RSP_ACCEPT;
+                else
+                    ret = BTA_AV_RSP_REJ;
+            }
         }
     }
 
@@ -396,23 +412,34 @@ static tBTA_AV_CODE bta_av_group_navi_supported(UINT8 len, UINT8 *p_data)
 ** Returns          BTA_AV_RSP_ACCEPT of supported, BTA_AV_RSP_NOT_IMPL if not.
 **
 *******************************************************************************/
-static tBTA_AV_CODE bta_av_op_supported(tBTA_AV_RC rc_id)
+static tBTA_AV_CODE bta_av_op_supported(tBTA_AV_RC rc_id, BOOLEAN is_inquiry)
 {
     tBTA_AV_CODE ret_code = BTA_AV_RSP_NOT_IMPL;
 
     if (p_bta_av_rc_id)
     {
-        if (p_bta_av_rc_id[rc_id >> 4] & (1 << (rc_id & 0x0F)))
+        if (is_inquiry)
         {
-            ret_code = BTA_AV_RSP_ACCEPT;
-        }
-        else if ((p_bta_av_cfg->rc_pass_rsp == BTA_AV_RSP_INTERIM) && p_bta_av_rc_id_ac)
-        {
-            if (p_bta_av_rc_id_ac[rc_id >> 4] & (1 << (rc_id & 0x0F)))
+            if (p_bta_av_rc_id[rc_id >> 4] & (1 << (rc_id & 0x0F)))
             {
-                ret_code = BTA_AV_RSP_INTERIM;
+                ret_code = BTA_AV_RSP_IMPL_STBL;
             }
         }
+        else
+        {
+            if (p_bta_av_rc_id[rc_id >> 4] & (1 << (rc_id & 0x0F)))
+            {
+                ret_code = BTA_AV_RSP_ACCEPT;
+            }
+            else if ((p_bta_av_cfg->rc_pass_rsp == BTA_AV_RSP_INTERIM) && p_bta_av_rc_id_ac)
+            {
+                if (p_bta_av_rc_id_ac[rc_id >> 4] & (1 << (rc_id & 0x0F)))
+                {
+                    ret_code = BTA_AV_RSP_INTERIM;
+                }
+            }
+        }
+
     }
     return ret_code;
 }
@@ -474,6 +501,15 @@ void bta_av_rc_opened(tBTA_AV_CB *p_cb, tBTA_AV_DATA *p_data)
     for(i=0; i<BTA_AV_NUM_STRS; i++)
     {
         p_scb = p_cb->p_scb[i];
+        /*If SCB is created and it is Sink SCB, we don't need AVRCP Connection*/
+        if ((p_scb) && (p_scb->seps[p_scb->sep_idx].tsep == AVDT_TSEP_SNK)
+            && (p_scb->state > AV_SCB_INIT_STATE))
+        {
+            APPL_TRACE_WARNING0(" Has A2DP Sink, rejecting AVRCP ");
+            AVRC_Close(p_data->rc_conn_chg.handle);
+            return;
+        }
+
         if(p_scb && bdcmp(p_scb->peer_addr, p_data->rc_conn_chg.peer_addr) == 0)
         {
             p_scb->rc_handle = p_data->rc_conn_chg.handle;
@@ -645,9 +681,12 @@ void bta_av_rc_meta_rsp(tBTA_AV_CB *p_cb, tBTA_AV_DATA *p_data)
             (!p_data->api_meta_rsp.is_rsp && (p_cb->features & BTA_AV_FEAT_RCCT)) )
         {
             p_rcb = &p_cb->rcb[p_data->hdr.layer_specific];
-            AVRC_MsgReq(p_rcb->handle, p_data->api_meta_rsp.label, p_data->api_meta_rsp.rsp_code,
-                                      p_data->api_meta_rsp.p_pkt);
-            free = FALSE;
+            if (p_rcb->handle != BTA_AV_RC_HANDLE_NONE) {
+                AVRC_MsgReq(p_rcb->handle, p_data->api_meta_rsp.label,
+                            p_data->api_meta_rsp.rsp_code,
+                            p_data->api_meta_rsp.p_pkt);
+                free = FALSE;
+            }
         }
     }
 
@@ -741,6 +780,8 @@ tBTA_AV_EVT bta_av_proc_meta_cmd(tAVRC_RESPONSE  *p_rc_rsp, tBTA_AV_RC_MSG *p_ms
     UINT16      u16;
     tAVRC_MSG_VENDOR    *p_vendor = &p_msg->msg.vendor;
 
+#if (AVRC_METADATA_INCLUDED == TRUE)
+
     pdu = *(p_vendor->p_vendor_data);
     p_rc_rsp->pdu = pdu;
     *p_ctype = AVRC_RSP_REJ;
@@ -752,6 +793,13 @@ tBTA_AV_EVT bta_av_proc_meta_cmd(tAVRC_RESPONSE  *p_rc_rsp, tBTA_AV_RC_MSG *p_ms
         evt=0;
         p_vendor->hdr.ctype = BTA_AV_RSP_NOT_IMPL;
         AVRC_VendorRsp(p_msg->handle, p_msg->label, &p_msg->msg.vendor);
+    }
+    else if (!AVRC_IsValidAvcType(pdu, p_vendor->hdr.ctype) )
+    {
+        APPL_TRACE_DEBUG2("Invalid pdu/ctype: 0x%x, %d", pdu, p_vendor->hdr.ctype);
+        /* reject invalid message without reporting to app */
+        evt = 0;
+        p_rc_rsp->rsp.status = AVRC_STS_BAD_CMD;
     }
     else
     {
@@ -804,10 +852,50 @@ tBTA_AV_EVT bta_av_proc_meta_cmd(tAVRC_RESPONSE  *p_rc_rsp, tBTA_AV_RC_MSG *p_ms
 
         }
     }
+#else
+    APPL_TRACE_DEBUG0("AVRCP 1.3 Metadata not supporteed. Reject command.");
+    /* reject invalid message without reporting to app */
+    evt = 0;
+    p_rc_rsp->rsp.status = AVRC_STS_BAD_CMD;
+#endif
 
     return evt;
 }
 
+/*****************************************************************************
+**
+** Function        bta_av_proc_browse_cmd
+**
+** Description     Process and AVRCP browse command from the peer
+**
+** Returns         status
+**
+****************************************************************************/
+tBTA_AV_EVT bta_av_proc_browse_cmd(tAVRC_RESPONSE  *p_rc_rsp, tBTA_AV_RC_MSG *p_msg)
+{
+    tBTA_AV_EVT evt = BTA_AV_BROWSE_MSG_EVT;
+    UINT8       u8, pdu, *p;
+    UINT16      u16;
+    tAVRC_MSG_BROWSE *p_browse = &p_msg->msg.browse;
+
+    pdu = p_browse->p_browse_data[0];
+    APPL_TRACE_DEBUG1("bta_av_proc_browse_cmd browse cmd: %x",pdu);
+    switch (pdu)
+    {
+        case AVRC_PDU_GET_FOLDER_ITEMS:
+            break;
+
+        case AVRC_PDU_SET_BROWSED_PLAYER:
+            break;
+
+        default:
+            evt = 0;
+            p_rc_rsp->rsp.status = AVRC_STS_BAD_CMD;
+            APPL_TRACE_ERROR0("### Not supported cmd");
+            break;
+    }
+    return evt;
+}
 
 /*******************************************************************************
 **
@@ -824,21 +912,41 @@ void bta_av_rc_msg(tBTA_AV_CB *p_cb, tBTA_AV_DATA *p_data)
     tBTA_AV     av;
     BT_HDR      *p_pkt = NULL;
     tAVRC_MSG_VENDOR    *p_vendor = &p_data->rc_msg.msg.vendor;
+    BOOLEAN is_inquiry = ((p_data->rc_msg.msg.hdr.ctype == AVRC_CMD_SPEC_INQ) || p_data->rc_msg.msg.hdr.ctype == AVRC_CMD_GEN_INQ);
+#if (AVRC_METADATA_INCLUDED == TRUE)
+    tAVRC_STS   res;
+    UINT8       ctype;
+    tAVRC_RESPONSE  rc_rsp;
+
+    rc_rsp.rsp.status = BTA_AV_STS_NO_RSP;
+#endif
+    APPL_TRACE_DEBUG1("bta_av_rc_msg opcode: %x",p_data->rc_msg.opcode);
 
     if (p_data->rc_msg.opcode == AVRC_OP_PASS_THRU)
     {
     /* if this is a pass thru command */
-        if (p_data->rc_msg.msg.hdr.ctype == AVRC_CMD_CTRL)
+        if ((p_data->rc_msg.msg.hdr.ctype == AVRC_CMD_CTRL) ||
+            (p_data->rc_msg.msg.hdr.ctype == AVRC_CMD_SPEC_INQ) ||
+            (p_data->rc_msg.msg.hdr.ctype == AVRC_CMD_GEN_INQ)
+            )
         {
         /* check if operation is supported */
             if (p_data->rc_msg.msg.pass.op_id == AVRC_ID_VENDOR)
             {
                 p_data->rc_msg.msg.hdr.ctype = BTA_AV_RSP_NOT_IMPL;
+#if (AVRC_METADATA_INCLUDED == TRUE)
+                if (p_cb->features & BTA_AV_FEAT_METADATA)
+                    p_data->rc_msg.msg.hdr.ctype =
+                        bta_av_group_navi_supported(p_data->rc_msg.msg.pass.pass_len,
+                        p_data->rc_msg.msg.pass.p_pass_data, is_inquiry);
+#endif
             }
             else
             {
-                p_data->rc_msg.msg.hdr.ctype = bta_av_op_supported(p_data->rc_msg.msg.pass.op_id);
+                p_data->rc_msg.msg.hdr.ctype = bta_av_op_supported(p_data->rc_msg.msg.pass.op_id, is_inquiry);
             }
+
+            APPL_TRACE_DEBUG1("ctype %d",p_data->rc_msg.msg.hdr.ctype)
 
             /* send response */
             if (p_data->rc_msg.msg.hdr.ctype != BTA_AV_RSP_INTERIM)
@@ -887,12 +995,30 @@ void bta_av_rc_msg(tBTA_AV_CB *p_cb, tBTA_AV_DATA *p_data)
         if ((p_cb->features & BTA_AV_FEAT_VENDOR)  &&
             p_data->rc_msg.msg.hdr.ctype <= AVRC_CMD_GEN_INQ)
         {
+#if (AVRC_METADATA_INCLUDED == TRUE)
+            if ((p_cb->features & BTA_AV_FEAT_METADATA) &&
+               (p_vendor->company_id == AVRC_CO_METADATA))
+            {
+                av.meta_msg.p_msg = &p_data->rc_msg.msg;
+                evt = bta_av_proc_meta_cmd (&rc_rsp, &p_data->rc_msg, &ctype);
+            }
+            else
+#endif
                 evt = BTA_AV_VENDOR_CMD_EVT;
         }
         /* else if configured to support vendor specific and it's a response */
         else if ((p_cb->features & BTA_AV_FEAT_VENDOR) &&
                  p_data->rc_msg.msg.hdr.ctype >= AVRC_RSP_ACCEPT)
         {
+#if (AVRC_METADATA_INCLUDED == TRUE)
+            if ((p_cb->features & BTA_AV_FEAT_METADATA) &&
+               (p_vendor->company_id == AVRC_CO_METADATA))
+            {
+                av.meta_msg.p_msg = &p_data->rc_msg.msg;
+                evt = BTA_AV_META_MSG_EVT;
+            }
+            else
+#endif
                 evt = BTA_AV_VENDOR_RSP_EVT;
 
         }
@@ -911,6 +1037,37 @@ void bta_av_rc_msg(tBTA_AV_CB *p_cb, tBTA_AV_DATA *p_data)
            AVRC_VendorRsp(p_data->rc_msg.handle, p_data->rc_msg.label, &p_data->rc_msg.msg.vendor);
         }
     }
+#if (AVCT_BROWSE_INCLUDED == TRUE)
+    else if (p_data->rc_msg.opcode == AVRC_OP_BROWSE )
+    {
+        APPL_TRACE_DEBUG1("browse len PDU :%x",p_data->rc_msg.msg.browse.browse_len);
+        APPL_TRACE_DEBUG1("browse  data:%x",p_data->rc_msg.msg.browse.p_browse_data[0]);
+        av.browse_msg.label = p_data->rc_msg.label;
+        av.browse_msg.p_msg = &p_data->rc_msg.msg;
+
+        evt = bta_av_proc_browse_cmd(&rc_rsp, &p_data->rc_msg);
+        if (evt == 0)
+        {
+            APPL_TRACE_ERROR0("Browse PDU not supported");
+            rc_rsp.rsp.pdu    = AVRC_PDU_GENERAL_REJECT;
+            rc_rsp.rsp.status = AVRC_STS_BAD_CMD;
+            ctype = 0;
+            AVRC_BldBrowseResponse(0, &rc_rsp, &p_pkt);
+        }
+    }
+#endif
+#if (AVRC_METADATA_INCLUDED == TRUE)
+    if (evt == 0 && rc_rsp.rsp.status != BTA_AV_STS_NO_RSP)
+    {
+        if (!p_pkt)
+        {
+            rc_rsp.rsp.opcode = p_data->rc_msg.opcode;
+            res = AVRC_BldResponse (0, &rc_rsp, &p_pkt);
+        }
+        if (p_pkt)
+            AVRC_MsgReq (p_data->rc_msg.handle, p_data->rc_msg.label, ctype, p_pkt);
+    }
+#endif
 
     /* call callback */
     if (evt != 0)
@@ -1335,17 +1492,10 @@ void bta_av_sig_chg(tBTA_AV_DATA *p_data)
             {
                 mask = 1 << xx;
                 APPL_TRACE_DEBUG1("conn_lcb: 0x%x", p_cb->conn_lcb);
-                if(!(mask & p_cb->conn_lcb))
-                {
-                    if (!p_cb->p_scb[xx])
-                    {
-                        /* We do not have scb for this avdt connection.     */
-                        /* Silently close the connection.                   */
-                        APPL_TRACE_ERROR0("av scb not available for avdt connection");
-                        AVDT_DisconnectReq (p_data->str_msg.bd_addr, NULL);
-                        return;
-                    }
 
+                /* look for a p_lcb with its p_scb registered */
+                if((!(mask & p_cb->conn_lcb)) && (p_cb->p_scb[xx] != NULL))
+                {
                     p_lcb = &p_cb->lcb[xx];
                     p_lcb->lidx = xx + 1;
                     bdcpy(p_lcb->addr, p_data->str_msg.bd_addr);
@@ -1371,7 +1521,9 @@ void bta_av_sig_chg(tBTA_AV_DATA *p_data)
                          * The following function shall send the event and start the recurring timer
                          */
                         bta_av_sig_timer(NULL);
-
+                        APPL_TRACE_DEBUG0("Re-start timer for AVDTP service");
+                        bta_sys_conn_open(BTA_ID_AV, p_cb->p_scb[xx]->app_id,
+                                p_cb->p_scb[xx]->peer_addr);
                         /* Possible collision : need to avoid outgoing processing while the timer is running */
                         p_cb->p_scb[xx]->coll_mask = BTA_AV_COLL_INC_TMR;
 
@@ -1381,6 +1533,16 @@ void bta_av_sig_chg(tBTA_AV_DATA *p_data)
                     }
                     break;
                 }
+            }
+
+            /* check if we found something */
+            if (xx == BTA_AV_NUM_LINKS)
+            {
+                /* We do not have scb for this avdt connection.     */
+                /* Silently close the connection.                   */
+                APPL_TRACE_ERROR0("av scb not available for avdt connection");
+                AVDT_DisconnectReq (p_data->str_msg.bd_addr, NULL);
+                return;
             }
         }
     }
@@ -1393,23 +1555,34 @@ void bta_av_sig_chg(tBTA_AV_DATA *p_data)
     else
     {
         /* disconnected. */
+        int is_lcb_used = bta_av_cb.conn_lcb;
+        APPL_TRACE_DEBUG1(" is_lcb_used is %d",is_lcb_used);
         p_lcb = bta_av_find_lcb(p_data->str_msg.bd_addr, BTA_AV_LCB_FREE);
-        if(p_lcb && p_lcb->conn_msk)
+        if (p_lcb && (p_lcb->conn_msk || is_lcb_used))
         {
             APPL_TRACE_DEBUG1("conn_msk: 0x%x", p_lcb->conn_msk);
             /* clean up ssm  */
             for(xx=0; xx < BTA_AV_NUM_STRS; xx++)
             {
+
+                if ((p_cb->p_scb[xx]) &&
+                        (bdcmp(p_cb->p_scb[xx]->peer_addr, p_data->str_msg.bd_addr) == 0) )
+                {
+                    APPL_TRACE_DEBUG0("Closing timer for AVDTP service");
+                    bta_sys_conn_close(BTA_ID_AV, p_cb->p_scb[xx]->app_id,p_cb->p_scb[xx]->peer_addr);
+                }
                 mask = 1 << (xx + 1);
-                if ((mask & p_lcb->conn_msk) && (p_cb->p_scb[xx]) &&
+                if (((mask & p_lcb->conn_msk) || is_lcb_used)
+                     && (p_cb->p_scb[xx]) &&
                     (bdcmp(p_cb->p_scb[xx]->peer_addr, p_data->str_msg.bd_addr) == 0))
                 {
+                    APPL_TRACE_DEBUG0("Sending AVDT_DISCONNECT_EVT");
                     bta_av_ssm_execute(p_cb->p_scb[xx], BTA_AV_AVDT_DISCONNECT_EVT, NULL);
                 }
             }
         }
     }
-    APPL_TRACE_DEBUG1("conn_lcb: 0x%x", p_cb->conn_lcb);
+    APPL_TRACE_DEBUG1("sig_chg conn_lcb: 0x%x", p_cb->conn_lcb);
 }
 
 /*******************************************************************************
@@ -1516,9 +1689,10 @@ static void bta_av_acp_sig_timer_cback (TIMER_LIST_ENT *p_tle)
 **
 ** Function         bta_av_check_peer_features
 **
-** Description      checks
+** Description      check supported features on the peer device from the SDP record
+**                  and return the feature mask
 **
-** Returns          void
+** Returns          tBTA_AV_FEAT peer device feature mask
 **
 *******************************************************************************/
 tBTA_AV_FEAT bta_av_check_peer_features (UINT16 service_uuid)
@@ -1624,6 +1798,7 @@ void bta_av_rc_disc_done(tBTA_AV_DATA *p_data)
     }
 
     APPL_TRACE_DEBUG1("rc_handle %d", rc_handle);
+    /* check peer version and whether support CT and TG role */
     peer_features = bta_av_check_peer_features (UUID_SERVCLASS_AV_REMOTE_CONTROL);
     if ((p_cb->features & BTA_AV_FEAT_ADV_CTRL) && ((peer_features&BTA_AV_FEAT_ADV_CTRL) == 0))
     {
@@ -1650,7 +1825,20 @@ void bta_av_rc_disc_done(tBTA_AV_DATA *p_data)
                 if(p_lcb)
                 {
                     rc_handle = bta_av_rc_create(p_cb, AVCT_INT, (UINT8)(p_scb->hdi + 1), p_lcb->lidx);
-                    p_cb->rcb[rc_handle].peer_features = peer_features;
+                    if(rc_handle != BTA_AV_RC_HANDLE_NONE)
+                    {
+                        p_cb->rcb[rc_handle].peer_features = peer_features;
+                    }
+                    else
+                    {
+                        /* cannot create valid rc_handle for current device */
+                        APPL_TRACE_ERROR0(" No link resources available");
+                        p_scb->use_rc = FALSE;
+                        bdcpy(rc_open.peer_addr, p_scb->peer_addr);
+                        rc_open.peer_features = 0;
+                        rc_open.status = BTA_AV_FAIL_RESOURCES;
+                        (*p_cb->p_cback)(BTA_AV_RC_CLOSE_EVT, (tBTA_AV *) &rc_open);
+                    }
                 }
 #if (BT_USE_TRACES == TRUE || BT_TRACE_APPL == TRUE)
                 else
@@ -1896,6 +2084,11 @@ void bta_av_dereg_comp(tBTA_AV_DATA *p_data)
 #endif
                 bta_av_del_sdp_rec(&p_cb->sdp_a2d_handle);
                 bta_sys_remove_uuid(UUID_SERVCLASS_AUDIO_SOURCE);
+
+#ifdef BTA_AVK_INCLUDED
+                bta_av_del_sdp_rec(&p_cb->sdp_a2d_snk_handle);
+                bta_sys_remove_uuid(UUID_SERVCLASS_AUDIO_SINK);
+#endif
             }
         }
         else

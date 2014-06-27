@@ -31,6 +31,7 @@
 #include "gki.h"
 #include "bta_sys.h"
 #include "bta_gattc_int.h"
+#include "l2c_api.h"
 #include "bd.h"
 
 /*****************************************************************************
@@ -40,6 +41,8 @@
 
 static const UINT8  base_uuid[LEN_UUID_128] = {0xFB, 0x34, 0x9B, 0x5F, 0x80, 0x00, 0x00, 0x80,
     0x00, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+
+static const BD_ADDR dummy_bda = {0,0,0,0,0,0};
 
 /*******************************************************************************
 **
@@ -67,13 +70,13 @@ void bta_gatt_convert_uuid16_to_uuid128(UINT8 uuid_128[LEN_UUID_128], UINT16 uui
 ** Returns          TRUE if two uuid match; FALSE otherwise.
 **
 *******************************************************************************/
-BOOLEAN bta_gattc_uuid_compare (tBT_UUID src, tBT_UUID tar, BOOLEAN is_precise)
+BOOLEAN bta_gattc_uuid_compare (tBT_UUID *p_src, tBT_UUID *p_tar, BOOLEAN is_precise)
 {
     UINT8  su[LEN_UUID_128], tu[LEN_UUID_128];
     UINT8  *ps, *pt;
 
     /* any of the UUID is unspecified */
-    if (src.len == 0 || tar.len == 0)
+    if (p_src == 0 || p_tar == 0)
     {
         if (is_precise)
             return FALSE;
@@ -82,29 +85,29 @@ BOOLEAN bta_gattc_uuid_compare (tBT_UUID src, tBT_UUID tar, BOOLEAN is_precise)
     }
 
     /* If both are 16-bit, we can do a simple compare */
-    if (src.len == 2 && tar.len == 2)
+    if (p_src->len == 2 && p_tar->len == 2)
     {
-        return src.uu.uuid16 == tar.uu.uuid16;
+        return p_src->uu.uuid16 == p_tar->uu.uuid16;
     }
 
     /* One or both of the UUIDs is 128-bit */
-    if (src.len == LEN_UUID_16)
+    if (p_src->len == LEN_UUID_16)
     {
         /* convert a 16 bits UUID to 128 bits value */
-        bta_gatt_convert_uuid16_to_uuid128(su, src.uu.uuid16);
+        bta_gatt_convert_uuid16_to_uuid128(su, p_src->uu.uuid16);
         ps = su;
     }
     else
-        ps = src.uu.uuid128;
+        ps = p_src->uu.uuid128;
 
-    if (tar.len == LEN_UUID_16)
+    if (p_tar->len == LEN_UUID_16)
     {
         /* convert a 16 bits UUID to 128 bits value */
-        bta_gatt_convert_uuid16_to_uuid128(tu, tar.uu.uuid16);
+        bta_gatt_convert_uuid16_to_uuid128(tu, p_tar->uu.uuid16);
         pt = tu;
     }
     else
-        pt = tar.uu.uuid128;
+        pt = p_tar->uu.uuid128;
 
     return(memcmp(ps, pt, LEN_UUID_128) == 0);
 }
@@ -169,8 +172,7 @@ tBTA_GATTC_CLCB * bta_gattc_find_clcb_by_cif (UINT8 client_if, BD_ADDR remote_bd
     {
         if (p_clcb->in_use &&
             p_clcb->p_rcb->client_if == client_if &&
-            p_clcb->p_srcb &&
-            bdcmp(p_clcb->p_srcb->server_bda, remote_bda) == 0)
+            bdcmp(p_clcb->bda, remote_bda) == 0)
             return p_clcb;
     }
     return NULL;
@@ -221,6 +223,7 @@ tBTA_GATTC_CLCB * bta_gattc_clcb_alloc(tBTA_GATTC_IF client_if, BD_ADDR remote_b
 #endif
             p_clcb                  = &bta_gattc_cb.clcb[i_clcb];
             p_clcb->in_use          = TRUE;
+            p_clcb->status          = BTA_GATT_OK;
             bdcpy(p_clcb->bda, remote_bda);
 
             p_clcb->p_rcb = bta_gattc_cl_get_regcb(client_if);
@@ -275,18 +278,26 @@ tBTA_GATTC_CLCB *bta_gattc_find_alloc_clcb(tBTA_GATTC_IF client_if, BD_ADDR remo
 *******************************************************************************/
 void bta_gattc_clcb_dealloc(tBTA_GATTC_CLCB *p_clcb)
 {
+    tBTA_GATTC_SERV     *p_srcb = NULL;
 
     if (p_clcb)
     {
-        if (p_clcb->p_srcb->num_clcb)
-            p_clcb->p_srcb->num_clcb --;
+        p_srcb = p_clcb->p_srcb;
+        if (p_srcb->num_clcb)
+            p_srcb->num_clcb --;
 
         if (p_clcb->p_rcb->num_clcb)
             p_clcb->p_rcb->num_clcb --;
 
+        /* if the srcb is no longer needed, reset the state */
+        if ( p_srcb->num_clcb == 0)
+        {
+            p_srcb->connected = FALSE;
+            p_srcb->state = BTA_GATTC_SERV_IDLE;
+        }
+
         utl_freebuf((void **)&p_clcb->p_q_cmd);
 
-        APPL_TRACE_ERROR2("bta_gattc_clcb_dealloc in_use=%d conn_id=%d",p_clcb->in_use, p_clcb->bta_conn_id);
         memset(p_clcb, 0, sizeof(tBTA_GATTC_CLCB));
     }
     else
@@ -299,7 +310,7 @@ void bta_gattc_clcb_dealloc(tBTA_GATTC_CLCB *p_clcb)
 **
 ** Function         bta_gattc_find_srcb
 **
-** Description      find server cache by remote bd address
+** Description      find server cache by remote bd address currently in use
 **
 ** Returns          pointer to the server cache.
 **
@@ -312,6 +323,28 @@ tBTA_GATTC_SERV * bta_gattc_find_srcb(BD_ADDR bda)
     for (i = 0; i < BTA_GATTC_KNOWN_SR_MAX; i ++, p_srcb ++)
     {
         if (p_srcb->in_use && bdcmp(p_srcb->server_bda, bda) == 0)
+            return p_srcb;
+    }
+    return NULL;
+}
+
+/*******************************************************************************
+**
+** Function         bta_gattc_find_srvr_cache
+**
+** Description      find server cache by remote bd address
+**
+** Returns          pointer to the server cache.
+**
+*******************************************************************************/
+tBTA_GATTC_SERV * bta_gattc_find_srvr_cache(BD_ADDR bda)
+{
+    tBTA_GATTC_SERV *p_srcb = &bta_gattc_cb.known_server[0];
+    UINT8   i;
+
+    for (i = 0; i < BTA_GATTC_KNOWN_SR_MAX; i ++, p_srcb ++)
+    {
+        if (bdcmp(p_srcb->server_bda, bda) == 0)
             return p_srcb;
     }
     return NULL;
@@ -366,7 +399,7 @@ tBTA_GATTC_SERV * bta_gattc_srcb_alloc(BD_ADDR bda)
     /* if not found, try to recycle one known device */
     if (!found && !p_recycle)
         p_tcb = NULL;
-    else if (p_recycle)
+    else if (!found && p_recycle)
         p_tcb = p_recycle;
 
     if (p_tcb != NULL)
@@ -395,20 +428,152 @@ BOOLEAN bta_gattc_enqueue(tBTA_GATTC_CLCB *p_clcb, tBTA_GATTC_DATA *p_data)
 {
     BOOLEAN in_q = FALSE;
 
-    if (p_clcb->p_q_cmd == NULL)
+    if (p_clcb->p_q_cmd == NULL && p_data)
     {
-        p_clcb->p_q_cmd = (tBTA_GATTC_DATA *)GKI_getbuf(sizeof(tBTA_GATTC_DATA));
-
-        if (p_data)
-            memcpy(p_clcb->p_q_cmd, p_data, sizeof(tBTA_GATTC_DATA));
+        UINT16 len;
+        switch (p_data->hdr.event)
+        {
+            case BTA_GATTC_API_SEARCH_EVT:
+            {
+                if (p_data->api_search.p_srvc_uuid)
+                {
+                    len = sizeof(tBTA_GATTC_API_SEARCH) + sizeof(tBT_UUID);
+                }
+                else
+                {
+                    len = sizeof(tBTA_GATTC_API_SEARCH);
+                }
+                p_clcb->p_q_cmd = (tBTA_GATTC_DATA *)GKI_getbuf(len);
+                if (p_clcb->p_q_cmd == NULL)
+                {
+                    APPL_TRACE_ERROR0("allocate buffer failed for p_q_cmd");
+                    return FALSE;
+                }
+                memcpy(p_clcb->p_q_cmd, p_data, sizeof(tBTA_GATTC_API_SEARCH));
+                if (p_data->api_search.p_srvc_uuid)
+                {
+                    tBTA_GATTC_API_SEARCH *p_buf;
+                    p_buf = &(p_clcb->p_q_cmd->api_search);
+                    p_buf->p_srvc_uuid = (tBT_UUID *)(p_buf + 1);
+                    memcpy(p_buf->p_srvc_uuid, p_data->api_search.p_srvc_uuid,
+                           sizeof(tBT_UUID));
+                }
+                break;
+            }
+            case BTA_GATTC_API_READ_EVT:
+            {
+                if (p_data->api_read.p_descr_type)
+                {
+                    len = sizeof(tBTA_GATT_ID) + sizeof(tBTA_GATTC_API_READ);
+                }
+                else
+                {
+                    len = sizeof(tBTA_GATTC_API_READ);
+                }
+                p_clcb->p_q_cmd = (tBTA_GATTC_DATA *)GKI_getbuf(len);
+                if (p_clcb->p_q_cmd == NULL)
+                {
+                    APPL_TRACE_ERROR0("allocate buffer failed for p_q_cmd");
+                    return FALSE;
+                }
+                memcpy(p_clcb->p_q_cmd, p_data, sizeof(tBTA_GATTC_API_READ));
+                if (p_data->api_read.p_descr_type)
+                {
+                    tBTA_GATTC_API_READ *p_buf;
+                    p_buf = &(p_clcb->p_q_cmd->api_read);
+                    p_buf->p_descr_type = (tBTA_GATT_ID *)(p_buf + 1);
+                    memcpy(p_buf->p_descr_type, p_data->api_read.p_descr_type,
+                           sizeof(tBTA_GATT_ID));
+                }
+                break;
+            }
+            case BTA_GATTC_API_WRITE_EVT:
+            {
+                tBTA_GATTC_API_WRITE  *p_buf;
+                len = sizeof(tBTA_GATTC_API_WRITE) + p_data->api_write.len;
+                if (p_data->api_write.p_descr_type)
+                {
+                    len += sizeof(tBTA_GATT_ID);
+                }
+                p_clcb->p_q_cmd = (tBTA_GATTC_DATA *)GKI_getbuf(len);
+                if (p_clcb->p_q_cmd == NULL)
+                {
+                    APPL_TRACE_ERROR0("allocate buffer failed for p_q_cmd");
+                    return FALSE;
+                }
+                memcpy(p_clcb->p_q_cmd, p_data, sizeof(tBTA_GATTC_API_WRITE));
+                p_buf = &(p_clcb->p_q_cmd->api_write);
+                if (p_data->api_write.p_descr_type)
+                {
+                    p_buf->p_descr_type = (tBTA_GATT_ID *)(p_buf + 1);
+                    memcpy(p_buf->p_descr_type, p_data->api_write.p_descr_type,
+                           sizeof(tBTA_GATT_ID));
+                    if (p_buf->len && p_buf->p_value)
+                    {
+                        p_buf->p_value  = (UINT8 *)(p_buf->p_descr_type + 1);
+                        memcpy(p_buf->p_value, p_data->api_write.p_value,
+                               p_data->api_write.len);
+                    }
+                }
+                else if (p_buf->len && p_buf->p_value)
+                {
+                    p_buf->p_value = (UINT8 *)(p_buf + 1);
+                    memcpy(p_buf->p_value, p_data->api_write.p_value,
+                           p_data->api_write.len);
+                }
+                break;
+            }
+            case BTA_GATTC_API_EXEC_EVT:
+            {
+                len = sizeof(tBTA_GATTC_API_EXEC);
+                p_clcb->p_q_cmd = (tBTA_GATTC_DATA *)GKI_getbuf(len);
+                if (p_clcb->p_q_cmd == NULL)
+                {
+                    APPL_TRACE_ERROR0("allocate buffer failed for p_q_cmd");
+                    return FALSE;
+                }
+                memcpy(p_clcb->p_q_cmd, p_data, len);
+                break;
+            }
+            case BTA_GATTC_API_READ_MULTI_EVT:
+            {
+                len = sizeof(tBTA_GATTC_API_READ_MULTI) +
+                      p_data->api_read_multi.num_attr * sizeof(tBTA_GATTC_ATTR_ID);
+                p_clcb->p_q_cmd = (tBTA_GATTC_DATA *)GKI_getbuf(len);
+                if (p_clcb->p_q_cmd == NULL)
+                {
+                    APPL_TRACE_ERROR0("allocate buffer failed for p_q_cmd");
+                    return FALSE;
+                }
+                memcpy(p_clcb->p_q_cmd, p_data, sizeof(tBTA_GATTC_API_READ_MULTI));
+                if (p_data->api_read_multi.num_attr &&
+                    p_data->api_read_multi.p_id_list)
+                {
+                    tBTA_GATTC_API_READ_MULTI *p_buf;
+                    p_buf = &(p_clcb->p_q_cmd->api_read_multi);
+                    p_buf->p_id_list = (tBTA_GATTC_ATTR_ID *)(p_buf + 1);
+                    memcpy(p_buf->p_id_list, p_data->api_read_multi.p_id_list,
+                        p_data->api_read_multi.num_attr * sizeof(tBTA_GATTC_ATTR_ID));
+                }
+                break;
+            }
+            default:
+                APPL_TRACE_ERROR1("queue unsupported command %d", p_data->hdr.event);
+                return FALSE;
+        }
 
         in_q = TRUE;
     }
-    else
+    else if (p_clcb->p_q_cmd)
     {
         APPL_TRACE_ERROR0("already has a pending command!!");
         /* skip the callback now. ----- need to send callback ? */
     }
+    else
+    {
+        APPL_TRACE_ERROR0("queue a null command");
+    }
+
     return in_q;
 }
 /*******************************************************************************
@@ -441,6 +606,85 @@ void bta_gattc_pack_attr_uuid(tBTA_GATTC_CACHE_ATTR   *p_attr, tBT_UUID *p_uuid)
 }
 /*******************************************************************************
 **
+** Function         bta_gattc_cpygattid
+**
+** Description      copy two tBTA_GATT_ID value
+**
+** Returns
+**
+*******************************************************************************/
+void bta_gattc_cpygattid(tBTA_GATT_ID *p_des, tBTA_GATT_ID *p_src)
+{
+    memset ((void *)p_des, 0, sizeof(tBTA_GATT_ID));
+
+    p_des->inst_id = p_src->inst_id;
+
+    p_des->uuid.len = p_src->uuid.len;
+
+    if (p_des->uuid.len == LEN_UUID_16)
+    {
+        p_des->uuid.uu.uuid16 = p_src->uuid.uu.uuid16;
+    }
+    else if (p_des->uuid.len == LEN_UUID_128)
+    {
+        memcpy(p_des->uuid.uu.uuid128, p_src->uuid.uu.uuid128, LEN_UUID_128);
+    }
+}
+/*******************************************************************************
+**
+** Function         bta_gattc_gattid_compare
+**
+** Description      compare two tBTA_GATT_ID type of pointer
+**
+** Returns
+**
+*******************************************************************************/
+BOOLEAN bta_gattc_gattid_compare(tBTA_GATT_ID *p_src, tBTA_GATT_ID *p_tar)
+{
+    if (p_src->inst_id == p_tar->inst_id &&
+        bta_gattc_uuid_compare (&p_src->uuid, &p_tar->uuid, TRUE ))
+        return TRUE;
+    else
+        return FALSE;
+
+}
+/*******************************************************************************
+**
+** Function         bta_gattc_srvcid_compare
+**
+** Description      compare two tBTA_GATT_SRVC_ID type of pointer
+**
+** Returns
+**
+*******************************************************************************/
+BOOLEAN bta_gattc_srvcid_compare(tBTA_GATT_SRVC_ID *p_src, tBTA_GATT_SRVC_ID *p_tar)
+{
+    if (p_src->is_primary == p_tar->is_primary &&
+        bta_gattc_gattid_compare (&p_src->id, &p_tar->id))
+        return TRUE;
+    else
+        return FALSE;
+}
+/*******************************************************************************
+**
+** Function         bta_gattc_charid_compare
+**
+** Description      compare two tBTA_GATTC_CHAR_ID type of pointer
+**
+** Returns
+**
+*******************************************************************************/
+BOOLEAN bta_gattc_charid_compare(tBTA_GATTC_CHAR_ID *p_src, tBTA_GATTC_CHAR_ID *p_tar)
+{
+    if (bta_gattc_gattid_compare (&p_src->char_id, &p_tar->char_id) &&
+        bta_gattc_srvcid_compare (&p_src->srvc_id, &p_tar->srvc_id))
+        return TRUE;
+    else
+        return FALSE;
+}
+
+/*******************************************************************************
+**
 ** Function         bta_gattc_check_notif_registry
 **
 ** Description      check if the service notificaition has been registered.
@@ -457,12 +701,7 @@ BOOLEAN bta_gattc_check_notif_registry(tBTA_GATTC_RCB  *p_clreg, tBTA_GATTC_SERV
     {
         if (p_clreg->notif_reg[i].in_use &&
             bdcmp(p_clreg->notif_reg[i].remote_bda, p_srcb->server_bda) == 0 &&
-            (bta_gattc_uuid_compare(p_clreg->notif_reg[i].char_id.srvc_id.id.uuid, p_notify->char_id.srvc_id.id.uuid, FALSE) &&
-              p_clreg->notif_reg[i].char_id.srvc_id.id.inst_id == p_notify->char_id.srvc_id.id.inst_id &&
-              p_clreg->notif_reg[i].char_id.srvc_id.is_primary == p_notify->char_id.srvc_id.is_primary  &&
-              bta_gattc_uuid_compare(p_clreg->notif_reg[i].char_id.char_id.uuid, p_notify->char_id.char_id.uuid, FALSE) &&
-              p_clreg->notif_reg[i].char_id.char_id.inst_id == p_notify->char_id.char_id.inst_id)
-           )
+            bta_gattc_charid_compare (&p_clreg->notif_reg[i].char_id, &p_notify->char_id))
         {
             APPL_TRACE_DEBUG0("Notification registered!");
             return TRUE;
@@ -514,8 +753,10 @@ void bta_gattc_clear_notif_registration(UINT16 conn_id)
 ** Returns
 **
 *******************************************************************************/
-tBTA_GATT_STATUS bta_gattc_pack_read_cb_data(tBTA_GATTC_SERV *p_srcb, tBT_UUID descr_uuid,
-                                             tGATT_VALUE *p_attr, tBTA_GATT_READ_VAL *p_value)
+tBTA_GATT_STATUS bta_gattc_pack_read_cb_data(tBTA_GATTC_SERV *p_srcb,
+                                             tBT_UUID *p_descr_uuid,
+                                             tGATT_VALUE *p_attr,
+                                             tBTA_GATT_READ_VAL *p_value)
 {
     UINT8                   i = 0, *pp = p_attr->value;
     tBT_UUID                uuid = {LEN_UUID_16, {GATT_UUID_CHAR_AGG_FORMAT}};
@@ -523,7 +764,7 @@ tBTA_GATT_STATUS bta_gattc_pack_read_cb_data(tBTA_GATTC_SERV *p_srcb, tBT_UUID d
     tBTA_GATT_STATUS        status = BTA_GATT_OK;
 
     /* GATT_UUID_CHAR_AGG_FORMAT */
-    if (bta_gattc_uuid_compare (uuid, descr_uuid, TRUE))
+    if (bta_gattc_uuid_compare (&uuid, p_descr_uuid, TRUE))
     {
         while (p_attr->len >= 2 && i < BTA_GATTC_MULTI_MAX)
         {
@@ -533,7 +774,7 @@ tBTA_GATT_STATUS bta_gattc_pack_read_cb_data(tBTA_GATTC_SERV *p_srcb, tBT_UUID d
                                     handle,
                                     &p_value->aggre_value.pre_format[i].char_id.srvc_id,
                                     &p_value->aggre_value.pre_format[i].char_id.char_id,
-                                    &p_value->aggre_value.pre_format[i].descr_type) == FALSE)
+                                    &p_value->aggre_value.pre_format[i].descr_id) == FALSE)
             {
                 status = BTA_GATT_INTERNAL_ERROR;
                 APPL_TRACE_ERROR1("can not map to GATT ID. handle = 0x%04x", handle);
@@ -562,22 +803,36 @@ tBTA_GATT_STATUS bta_gattc_pack_read_cb_data(tBTA_GATTC_SERV *p_srcb, tBT_UUID d
 ** Returns          TRUE if success; FALSE otherwise.
 **
 *******************************************************************************/
-BOOLEAN bta_gattc_mark_bg_conn (tBTA_GATTC_IF client_if,  BD_ADDR remote_bda, BOOLEAN add)
+BOOLEAN bta_gattc_mark_bg_conn (tBTA_GATTC_IF client_if,  BD_ADDR_PTR remote_bda_ptr,
+                                BOOLEAN add, BOOLEAN is_listen)
 {
     tBTA_GATTC_BG_TCK   *p_bg_tck = &bta_gattc_cb.bg_track[0];
     UINT8   i = 0;
+    tBTA_GATTC_CIF_MASK  *p_cif_mask;
 
     for (i = 0; i < BTA_GATTC_KNOWN_SR_MAX; i ++, p_bg_tck ++)
     {
         if (p_bg_tck->in_use &&
-            bdcmp(p_bg_tck->remote_bda, remote_bda) == 0)
+            ((remote_bda_ptr != NULL && bdcmp(p_bg_tck->remote_bda, remote_bda_ptr) == 0) ||
+            (remote_bda_ptr == NULL && bdcmp(p_bg_tck->remote_bda, dummy_bda) == 0)))
         {
+             p_cif_mask = is_listen ? &p_bg_tck->cif_adv_mask : &p_bg_tck->cif_mask;
+
             if (add)
                 /* mask on the cif bit */
-                p_bg_tck->cif_mask |= (1 <<(client_if - 1));
+                *p_cif_mask |= (1 <<(client_if - 1));
             else
-                p_bg_tck->cif_mask &= (~(1 <<(client_if - 1)));
-
+            {
+                if (client_if != 0)
+                    *p_cif_mask &= (~(1 <<(client_if - 1)));
+                else
+                    *p_cif_mask = 0;
+            }
+            /* no BG connection for this device, make it available */
+            if (p_bg_tck->cif_mask == 0 && p_bg_tck->cif_adv_mask == 0)
+            {
+                memset(p_bg_tck, 0, sizeof(tBTA_GATTC_BG_TCK));
+            }
             return TRUE;
         }
     }
@@ -594,8 +849,14 @@ BOOLEAN bta_gattc_mark_bg_conn (tBTA_GATTC_IF client_if,  BD_ADDR remote_bda, BO
             if (!p_bg_tck->in_use)
             {
                 p_bg_tck->in_use = TRUE;
-                bdcpy(p_bg_tck->remote_bda, remote_bda);
-                p_bg_tck->cif_mask = (1 <<(client_if - 1));
+                if (remote_bda_ptr)
+                    bdcpy(p_bg_tck->remote_bda, remote_bda_ptr);
+                else
+                    bdcpy(p_bg_tck->remote_bda, dummy_bda);
+
+                p_cif_mask = is_listen ? &p_bg_tck->cif_adv_mask : &p_bg_tck->cif_mask;
+
+                *p_cif_mask = (1 <<(client_if - 1));
                 return TRUE;
             }
         }
@@ -612,20 +873,25 @@ BOOLEAN bta_gattc_mark_bg_conn (tBTA_GATTC_IF client_if,  BD_ADDR remote_bda, BO
 ** Returns          TRUE if success; FALSE otherwise.
 **
 *******************************************************************************/
-BOOLEAN bta_gattc_check_bg_conn (tBTA_GATTC_IF client_if,  BD_ADDR remote_bda)
+BOOLEAN bta_gattc_check_bg_conn (tBTA_GATTC_IF client_if,  BD_ADDR remote_bda, UINT8 role)
 {
     tBTA_GATTC_BG_TCK   *p_bg_tck = &bta_gattc_cb.bg_track[0];
     UINT8       i = 0;
     BOOLEAN     is_bg_conn = FALSE;
 
-    for (i = 0; i < BTA_GATTC_KNOWN_SR_MAX; i ++, p_bg_tck ++)
+    for (i = 0; i < BTA_GATTC_KNOWN_SR_MAX && !is_bg_conn; i ++, p_bg_tck ++)
     {
         if (p_bg_tck->in_use &&
-            bdcmp(p_bg_tck->remote_bda, remote_bda) == 0)
+            (bdcmp(p_bg_tck->remote_bda, remote_bda) == 0 ||
+             bdcmp(p_bg_tck->remote_bda, dummy_bda) == 0))
         {
-            if ((p_bg_tck->cif_mask &(1 <<(client_if - 1))) != 0)
+            if (((p_bg_tck->cif_mask &(1 <<(client_if - 1))) != 0) &&
+                role == HCI_ROLE_MASTER)
                 is_bg_conn = TRUE;
-            break;
+
+            if (((p_bg_tck->cif_adv_mask &(1 <<(client_if - 1))) != 0) &&
+                role == HCI_ROLE_SLAVE)
+                is_bg_conn = TRUE;
         }
     }
     return is_bg_conn;
@@ -656,9 +922,165 @@ void bta_gattc_send_open_cback( tBTA_GATTC_RCB *p_clreg, tBTA_GATT_STATUS status
         (*p_clreg->p_cback)(BTA_GATTC_OPEN_EVT, &cb_data);
     }
 }
+/*******************************************************************************
+**
+** Function         bta_gattc_conn_alloc
+**
+** Description      allocate connection tracking spot
+**
+** Returns          pointer to the clcb
+**
+*******************************************************************************/
+tBTA_GATTC_CONN * bta_gattc_conn_alloc(BD_ADDR remote_bda)
+{
+    UINT8               i_conn = 0;
+    tBTA_GATTC_CONN     *p_conn = &bta_gattc_cb.conn_track[0];
+
+    for (i_conn = 0; i_conn < BTA_GATTC_CONN_MAX; i_conn++, p_conn ++)
+    {
+        if (!p_conn->in_use)
+        {
+#if BTA_GATT_DEBUG == TRUE
+            APPL_TRACE_DEBUG1("bta_gattc_conn_alloc: found conn_track[%d] available",i_conn);
+#endif
+            p_conn->in_use          = TRUE;
+            bdcpy(p_conn->remote_bda, remote_bda);
+            return p_conn;
+        }
+    }
+    return NULL;
+}
+
+/*******************************************************************************
+**
+** Function         bta_gattc_conn_find
+**
+** Description      allocate connection tracking spot
+**
+** Returns          pointer to the clcb
+**
+*******************************************************************************/
+tBTA_GATTC_CONN * bta_gattc_conn_find(BD_ADDR remote_bda)
+{
+    UINT8               i_conn = 0;
+    tBTA_GATTC_CONN     *p_conn = &bta_gattc_cb.conn_track[0];
+
+    for (i_conn = 0; i_conn < BTA_GATTC_CONN_MAX; i_conn++, p_conn ++)
+    {
+        if (p_conn->in_use && bdcmp(remote_bda, p_conn->remote_bda) == 0)
+        {
+#if BTA_GATT_DEBUG == TRUE
+            APPL_TRACE_DEBUG1("bta_gattc_conn_find: found conn_track[%d] matched",i_conn);
+#endif
+            return p_conn;
+        }
+    }
+    return NULL;
+}
 
 
+/*******************************************************************************
+**
+** Function         bta_gattc_conn_find_alloc
+**
+** Description      find or allocate connection tracking spot
+**
+** Returns          pointer to the clcb
+**
+*******************************************************************************/
+tBTA_GATTC_CONN * bta_gattc_conn_find_alloc(BD_ADDR remote_bda)
+{
+    tBTA_GATTC_CONN     *p_conn = bta_gattc_conn_find (remote_bda);
 
+    if (p_conn == NULL)
+    {
+        p_conn = bta_gattc_conn_alloc(remote_bda);
+    }
+    return p_conn;
+}
 
+/*******************************************************************************
+**
+** Function         bta_gattc_conn_dealloc
+**
+** Description      de-allocate connection tracking spot
+**
+** Returns          pointer to the clcb
+**
+*******************************************************************************/
+BOOLEAN bta_gattc_conn_dealloc(BD_ADDR remote_bda)
+{
+    tBTA_GATTC_CONN     *p_conn = bta_gattc_conn_find (remote_bda);
+
+    if (p_conn != NULL)
+    {
+        p_conn->in_use = FALSE;
+        memset(p_conn->remote_bda, 0, BD_ADDR_LEN);
+        return TRUE;
+    }
+    return FALSE;
+}
+
+/*******************************************************************************
+**
+** Function         bta_gattc_find_int_conn_clcb
+**
+** Description      try to locate a clcb when an internal connecion event arrives.
+**
+** Returns          pointer to the clcb
+**
+*******************************************************************************/
+tBTA_GATTC_CLCB * bta_gattc_find_int_conn_clcb(tBTA_GATTC_DATA *p_msg)
+{
+    tBTA_GATTC_CLCB *p_clcb = NULL;
+
+    if (p_msg->int_conn.role == HCI_ROLE_SLAVE)
+        bta_gattc_conn_find_alloc(p_msg->int_conn.remote_bda);
+
+    /* try to locate a logic channel */
+    if ((p_clcb = bta_gattc_find_clcb_by_cif(p_msg->int_conn.client_if,
+                                             p_msg->int_conn.remote_bda)) == NULL)
+    {
+        /* for a background connection or listening connection */
+        if (p_msg->int_conn.role == HCI_ROLE_SLAVE ||
+            bta_gattc_check_bg_conn(p_msg->int_conn.client_if,
+                                    p_msg->int_conn.remote_bda,
+                                    p_msg->int_conn.role))
+        {
+            /* allocate a new channel */
+            p_clcb = bta_gattc_clcb_alloc(p_msg->int_conn.client_if, p_msg->int_conn.remote_bda);
+        }
+    }
+    return p_clcb;
+}
+
+/*******************************************************************************
+**
+** Function         bta_gattc_find_int_disconn_clcb
+**
+** Description      try to locate a clcb when an internal disconnect callback arrives.
+**
+** Returns          pointer to the clcb
+**
+*******************************************************************************/
+tBTA_GATTC_CLCB * bta_gattc_find_int_disconn_clcb(tBTA_GATTC_DATA *p_msg)
+{
+    tBTA_GATTC_CLCB         *p_clcb = NULL;
+    tGATT_DISCONN_REASON    reason = p_msg->int_conn.reason;
+
+    bta_gattc_conn_dealloc(p_msg->int_conn.remote_bda);
+    /* connection attempt timeout, send connection callback event */
+    if (reason == GATT_CONN_CANCEL || reason == GATT_CONN_L2C_FAILURE)
+    {
+        p_clcb = bta_gattc_find_clcb_by_cif(p_msg->int_conn.client_if,
+                                            p_msg->int_conn.remote_bda);
+    }
+    else if ((p_clcb = bta_gattc_find_clcb_by_conn_id(p_msg->int_conn.hdr.layer_specific)) == NULL)
+    {
+        APPL_TRACE_DEBUG1("disconnection ID: [%d] not used by BTA",
+                           p_msg->int_conn.hdr.layer_specific);
+    }
+    return p_clcb;
+}
 
 #endif /* BTA_GATT_INCLUDED */

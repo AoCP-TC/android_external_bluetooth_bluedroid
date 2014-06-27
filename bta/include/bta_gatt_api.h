@@ -1,6 +1,6 @@
 /******************************************************************************
  *
- *  Copyright (C) 2003-2012 Broadcom Corporation
+ *  Copyright (C) 2003-2013 Broadcom Corporation
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -21,6 +21,7 @@
  *  This is the public interface file for BTA GATT.
  *
  ******************************************************************************/
+
 #ifndef BTA_GATT_API_H
 #define BTA_GATT_API_H
 
@@ -53,7 +54,7 @@ typedef struct
 {
     tBT_UUID    uuid;           /* uuid of the attribute */
     UINT8       inst_id;        /* instance ID */
-} tBTA_GATT_ID;
+} __attribute__((packed)) tBTA_GATT_ID;
 
 /* Success code and error codes */
 #define  BTA_GATT_OK                        GATT_SUCCESS
@@ -90,6 +91,7 @@ typedef struct
 #define  BTA_GATT_INVALID_CFG               GATT_INVALID_CFG                   /* 0x008b */
 #define  BTA_GATT_DUP_REG                   0x008c
 #define  BTA_GATT_ALREADY_OPEN              0x008d                              /* 0x008d */
+#define  BTA_GATT_CANCEL                    0x008e                              /* 0x008e */
 typedef UINT8 tBTA_GATT_STATUS;
 
 #define BTA_GATT_INVALID_CONN_ID   GATT_INVALID_CONN_ID
@@ -110,8 +112,11 @@ typedef UINT8 tBTA_GATT_STATUS;
 #define BTA_GATTC_PREP_WRITE_EVT    11  /* GATT prepare write  event */
 #define BTA_GATTC_EXEC_EVT          12  /* execute write complete event */
 #define BTA_GATTC_ACL_EVT           13  /* ACL up event */
-#define BTA_GATTC_CANCEL_OPEN_EVT   14   /*  cancel open event */
+#define BTA_GATTC_CANCEL_OPEN_EVT   14  /* cancel open event */
 #define BTA_GATTC_SRVC_CHG_EVT      15  /* service change event */
+#define BTA_GATTC_LISTEN_EVT        16  /* listen event */
+#define BTA_GATTC_ENC_CMPL_CB_EVT   17  /* encryption complete callback event */
+
 typedef UINT8 tBTA_GATTC_EVT;
 
 typedef tGATT_IF tBTA_GATTC_IF;
@@ -159,7 +164,7 @@ typedef struct
 typedef UINT8 tBTA_GATTC_WRITE_TYPE;
 
 #define BTA_GATT_CONN_UNKNOWN                   0
-#define BTA_GATT_CONN_NO_RESOURCES              GATT_CONN_NO_RESOURCES        /* connection fail for l2cap resource failure */
+#define BTA_GATT_CONN_L2C_FAILURE               GATT_CONN_L2C_FAILURE         /* general l2cap resource failure */
 #define BTA_GATT_CONN_TIMEOUT                   GATT_CONN_TIMEOUT             /* 0x08 connection timeout  */
 #define BTA_GATT_CONN_TERMINATE_PEER_USER       GATT_CONN_TERMINATE_PEER_USER /* 0x13 connection terminate by peer user  */
 #define BTA_GATT_CONN_TERMINATE_LOCAL_HOST      GATT_CONN_TERMINATE_LOCAL_HOST/* 0x16 connectionterminated by local host  */
@@ -184,7 +189,7 @@ typedef struct
 typedef struct
 {
     tBTA_GATTC_CHAR_ID      char_id;
-    tBT_UUID                descr_type;
+    tBTA_GATT_ID            descr_id;
 }tBTA_GATTC_CHAR_DESCR_ID;
 
 typedef struct
@@ -275,7 +280,7 @@ typedef struct
     tBTA_GATT_STATUS    status;
     tBTA_GATT_SRVC_ID   srvc_id;
     tBTA_GATT_ID        char_id;
-    tBT_UUID            descr_type;
+    tBTA_GATT_ID        descr_type;
     tBTA_GATT_READ_VAL  *p_value;
 }tBTA_GATTC_READ;
 
@@ -285,7 +290,7 @@ typedef struct
     tBTA_GATT_STATUS    status;
     tBTA_GATT_SRVC_ID   srvc_id;
     tBTA_GATT_ID        char_id;
-    tBT_UUID            descr_type;
+    tBTA_GATT_ID        descr_type;
 }tBTA_GATTC_WRITE;
 
 typedef struct
@@ -329,7 +334,7 @@ typedef struct
     UINT16              conn_id;
     BD_ADDR             bda;
     tBTA_GATTC_CHAR_ID  char_id;
-    tBT_UUID            descr_type;
+    tBTA_GATT_ID        descr_type;
     UINT16              len;
     UINT8               value[BTA_GATT_MAX_ATTR_LEN];
     BOOLEAN             is_notify;
@@ -345,6 +350,12 @@ typedef struct
 }tBTA_GATTC_OPEN_CLOSE;
 // btla-specific --
 
+typedef struct
+{
+    tBTA_GATTC_IF       client_if;
+    BD_ADDR             remote_bda;
+}tBTA_GATTC_ENC_CMPL_CB;
+
 typedef union
 {
     tBTA_GATT_STATUS        status;
@@ -358,8 +369,12 @@ typedef union
     tBTA_GATTC_WRITE        write;            /* write complete data */
     tBTA_GATTC_EXEC_CMPL    exec_cmpl;       /*  execute complete */
     tBTA_GATTC_NOTIFY       notify;           /* notification/indication event data */
+    tBTA_GATTC_ENC_CMPL_CB  enc_cmpl;
     BD_ADDR                 remote_bda;     /* service change event */
 } tBTA_GATTC;
+
+/* GATTC enable callback function */
+typedef void (tBTA_GATTC_ENB_CBACK)(tBTA_GATT_STATUS status);
 
 /* Client callback function */
 typedef void (tBTA_GATTC_CBACK)(tBTA_GATTC_EVT event, tBTA_GATTC *p_data);
@@ -386,6 +401,7 @@ typedef void (tBTA_GATTC_CBACK)(tBTA_GATTC_EVT event, tBTA_GATTC *p_data);
 #define BTA_GATTS_OPEN_EVT                              16
 #define BTA_GATTS_CANCEL_OPEN_EVT                       17
 #define BTA_GATTS_CLOSE_EVT                             18
+#define BTA_GATTS_LISTEN_EVT                            19
 
 typedef UINT8  tBTA_GATTS_EVT;
 typedef tGATT_IF tBTA_GATTS_IF;
@@ -544,9 +560,12 @@ typedef union
 
 }tBTA_GATTS;
 
+/* GATTS enable callback function */
+typedef void (tBTA_GATTS_ENB_CBACK)(tBTA_GATT_STATUS status);
 
 /* Server callback function */
 typedef void (tBTA_GATTS_CBACK)(tBTA_GATTS_EVT event,  tBTA_GATTS *p_data);
+
 /*****************************************************************************
 **  External Function Declarations
 *****************************************************************************/
@@ -559,6 +578,19 @@ extern "C"
 /**************************
 **  Client Functions
 ***************************/
+
+/*******************************************************************************
+**
+** Function         BTA_GATTC_Disable
+**
+** Description      This function is called to disable the GATTC module
+**
+** Parameters       None.
+**
+** Returns          None
+**
+*******************************************************************************/
+BTA_API extern void BTA_GATTC_Disable(void);
 
 /*******************************************************************************
 **
@@ -968,11 +1000,81 @@ BTA_API extern void BTA_GATTC_ReadMultiple(UINT16 conn_id, tBTA_GATTC_MULTI *p_r
                                            tBTA_GATT_AUTH_REQ auth_req);
 
 
+/*******************************************************************************
+**
+** Function         BTA_GATTC_Refresh
+**
+** Description      Refresh the server cache of the remote device
+**
+** Parameters       remote_bda: remote device BD address.
+**
+** Returns          void
+**
+*******************************************************************************/
+BTA_API extern void BTA_GATTC_Refresh(BD_ADDR remote_bda);
+
+
+/*******************************************************************************
+**
+** Function         BTA_GATTC_Listen
+**
+** Description      Start advertisement to listen for connection request.
+**
+** Parameters       client_if: server interface.
+**                  start: to start or stop listening for connection
+**                  remote_bda: remote device BD address, if listen to all device
+**                              use NULL.
+**
+** Returns          void
+**
+*******************************************************************************/
+BTA_API extern void BTA_GATTC_Listen(tBTA_GATTC_IF client_if, BOOLEAN start, BD_ADDR_PTR target_bda);
+
+/*******************************************************************************
+**
+** Function         BTA_GATTC_Broadcast
+**
+** Description      Start broadcasting (non-connectable advertisements)
+**
+** Parameters       client_if: client interface.
+**                  start: to start or stop listening for connection
+**
+** Returns          void
+**
+*******************************************************************************/
+BTA_API extern void BTA_GATTC_Broadcast(tBTA_GATTC_IF client_if, BOOLEAN start);
 
 
 /*******************************************************************************
 **  BTA GATT Server API
 ********************************************************************************/
+
+/*******************************************************************************
+**
+** Function         BTA_GATTS_Init
+**
+** Description      This function is called to initalize GATTS module
+**
+** Parameters       None
+**
+** Returns          None
+**
+*******************************************************************************/
+    BTA_API extern void BTA_GATTS_Init();
+
+/*******************************************************************************
+**
+** Function         BTA_GATTS_Disable
+**
+** Description      This function is called to disable GATTS module
+**
+** Parameters       None.
+**
+** Returns          None
+**
+*******************************************************************************/
+    BTA_API extern void BTA_GATTS_Disable(void);
+
 /*******************************************************************************
 **
 ** Function         BTA_GATTS_AppRegister
@@ -1207,6 +1309,24 @@ BTA_API extern void BTA_GATTC_ReadMultiple(UINT16 conn_id, tBTA_GATTC_MULTI *p_r
 **
 *******************************************************************************/
     BTA_API extern void BTA_GATTS_Close(UINT16 conn_id);
+
+/*******************************************************************************
+**
+** Function         BTA_GATTS_Listen
+**
+** Description      Start advertisement to listen for connection request for a
+**                  GATT server
+**
+** Parameters       server_if: server interface.
+**                  start: to start or stop listening for connection
+**                  remote_bda: remote device BD address, if listen to all device
+**                              use NULL.
+**
+** Returns          void
+**
+*******************************************************************************/
+    BTA_API extern void BTA_GATTS_Listen(tBTA_GATTS_IF server_if, BOOLEAN start,
+                                        BD_ADDR_PTR target_bda);
 
 
 #ifdef __cplusplus

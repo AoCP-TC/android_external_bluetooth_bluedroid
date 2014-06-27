@@ -98,6 +98,23 @@ void gatt_free_pending_ind(tGATT_TCB *p_tcb)
 
 /*******************************************************************************
 **
+** Function         gatt_free_pending_enc_queue
+**
+** Description       Free all buffers in pending encyption queue
+**
+** Returns       None
+**
+*******************************************************************************/
+void gatt_free_pending_enc_queue(tGATT_TCB *p_tcb)
+{
+    GATT_TRACE_DEBUG0("gatt_free_pending_enc_queue");
+    /* release all queued indications */
+    while (p_tcb->pending_enc_clcb.p_first)
+        GKI_freebuf (GKI_dequeue (&p_tcb->pending_enc_clcb));
+}
+
+/*******************************************************************************
+**
 ** Function         gatt_delete_dev_from_srv_chg_clt_list
 **
 ** Description    Delete a device from the service changed client lit
@@ -693,7 +710,7 @@ BOOLEAN gatt_find_the_connected_bda(UINT8 start_idx, BD_ADDR bda, UINT8 *p_found
 
     for (i = start_idx ; i < GATT_MAX_PHY_CHANNEL; i ++)
     {
-        if (gatt_cb.tcb[i].in_use)
+        if (gatt_cb.tcb[i].in_use && gatt_cb.tcb[i].ch_state == GATT_CH_OPEN)
         {
             memcpy( bda, gatt_cb.tcb[i].peer_bda, BD_ADDR_LEN);
             *p_found_idx = i;
@@ -920,6 +937,8 @@ tGATT_TCB * gatt_allocate_tcb_by_bdaddr(BD_ADDR bda)
         if (allocated)
         {
             memset(p_tcb, 0, sizeof(tGATT_TCB));
+            GKI_init_q (&p_tcb->pending_enc_clcb);
+            GKI_init_q (&p_tcb->pending_ind_q);
             p_tcb->in_use = TRUE;
             p_tcb->tcb_idx = i;
         }
@@ -1258,7 +1277,6 @@ UINT8 gatt_sr_alloc_rcb(tGATT_HDL_LIST_ELEM *p_list )
             p_sreg->type                = p_list->asgn_range.is_primary ? GATT_UUID_PRI_SERVICE: GATT_UUID_SEC_SERVICE;
             p_sreg->s_hdl               = p_list->asgn_range.s_handle;
             p_sreg->e_hdl               = p_list->asgn_range.e_handle;
-            //p_sreg->sr_cb               = *p_cback;
             p_sreg->p_db                = &p_list->svc_db;
 
             GATT_TRACE_DEBUG1 ("total GKI buffer in db [%d]",p_sreg->p_db->svc_buffer.count);
@@ -2109,6 +2127,7 @@ void gatt_cleanup_upon_disc(BD_ADDR bda, UINT16 reason)
         btu_stop_timer (&p_tcb->ind_ack_timer_ent);
         btu_stop_timer (&p_tcb->conf_timer_ent);
         gatt_free_pending_ind(p_tcb);
+        gatt_free_pending_enc_queue(p_tcb);
 
         for (i = 0; i < GATT_MAX_APPS; i ++)
         {
@@ -2272,13 +2291,15 @@ tGATT_BG_CONN_DEV * gatt_alloc_bg_dev(BD_ADDR remote_bda)
 **
 ** Description      add/remove device from the back ground connection device list
 **
-** Returns          pointer to the device record
+** Returns          TRUE if device added to the list; FALSE failed
 **
 *******************************************************************************/
-BOOLEAN gatt_add_bg_dev_list(tGATT_IF gatt_if, BD_ADDR bd_addr)
+BOOLEAN gatt_add_bg_dev_list(tGATT_REG *p_reg,  BD_ADDR bd_addr, BOOLEAN is_initator)
 {
+    tGATT_IF gatt_if =  p_reg->gatt_if;
     tGATT_BG_CONN_DEV   *p_dev = NULL;
-    UINT8   i;
+    UINT8       i;
+    BOOLEAN      ret = FALSE;
 
     if ((p_dev = gatt_find_bg_dev(bd_addr)) == NULL)
     {
@@ -2289,25 +2310,54 @@ BOOLEAN gatt_add_bg_dev_list(tGATT_IF gatt_if, BD_ADDR bd_addr)
     {
         for (i = 0; i < GATT_MAX_APPS; i ++)
         {
-            if (p_dev->gatt_if[i] == gatt_if)
+            if (is_initator)
             {
-                GATT_TRACE_ERROR0("device already in list");
-                return FALSE;
+                if (p_dev->gatt_if[i] == gatt_if)
+                {
+                    GATT_TRACE_ERROR0("device already in iniator white list");
+                    return TRUE;
+                }
+                else if (p_dev->gatt_if[i] == 0)
+                {
+                    p_dev->gatt_if[i] = gatt_if;
+                    if (i == 0)
+                        ret = BTM_BleUpdateBgConnDev(TRUE, bd_addr);
+                    else
+                        ret = TRUE;
+                    break;
+                }
             }
-            else if (p_dev->gatt_if[i] == 0)
+            else
             {
-                GATT_TRACE_DEBUG0("add device into list");
-                p_dev->gatt_if[i] = gatt_if;
-                return TRUE;
+                if (p_dev->listen_gif[i] == gatt_if)
+                {
+                    GATT_TRACE_ERROR0("device already in adv white list");
+                    return TRUE;
+                }
+                else if (p_dev->listen_gif[i] == 0)
+                {
+                    if (p_reg->listening == GATT_LISTEN_TO_ALL)
+                        p_reg->listening = GATT_LISTEN_TO_NONE;
+
+                    p_reg->listening ++;
+                    p_dev->listen_gif[i] = gatt_if;
+
+                    if (i == 0)
+                        ret = BTM_BleUpdateAdvWhitelist(TRUE, bd_addr);
+                    else
+                        ret = TRUE;
+                    break;
+                }
             }
         }
     }
+    else
+    {
+        GATT_TRACE_ERROR0("no device record available");
+    }
 
-    GATT_TRACE_ERROR0("no device record available");
-
-    return FALSE;
+    return ret;
 }
-
 
 /*******************************************************************************
 **
@@ -2325,7 +2375,7 @@ BOOLEAN gatt_remove_bg_dev_for_app(tGATT_IF gatt_if, BD_ADDR bd_addr)
 
     if (p_tcb)
         gatt_update_app_use_link_flag(gatt_if, p_tcb, FALSE, FALSE);
-    status = gatt_update_auto_connect_dev(gatt_if, FALSE, bd_addr);
+    status = gatt_update_auto_connect_dev(gatt_if, FALSE, bd_addr, TRUE);
     return status;
 }
 
@@ -2393,13 +2443,15 @@ BOOLEAN gatt_find_app_for_bg_dev(BD_ADDR bd_addr, tGATT_IF *p_gatt_if)
 **
 ** Function         gatt_remove_bg_dev_from_list
 **
-** Description      add/remove device from the back ground connection device list
+** Description      add/remove device from the back ground connection device list or
+**                  listening to advertising list.
 **
 ** Returns          pointer to the device record
 **
 *******************************************************************************/
-BOOLEAN gatt_remove_bg_dev_from_list(tGATT_IF gatt_if, BD_ADDR bd_addr)
+BOOLEAN gatt_remove_bg_dev_from_list(tGATT_REG *p_reg, BD_ADDR bd_addr, BOOLEAN is_initiator)
 {
+    tGATT_IF gatt_if = p_reg->gatt_if;
     tGATT_BG_CONN_DEV   *p_dev = NULL;
     UINT8   i, j;
     BOOLEAN ret = FALSE;
@@ -2409,25 +2461,47 @@ BOOLEAN gatt_remove_bg_dev_from_list(tGATT_IF gatt_if, BD_ADDR bd_addr)
         return ret;
     }
 
-    for (i = 0; i < GATT_MAX_APPS && p_dev->gatt_if[i] > 0; i ++)
+    for (i = 0; i < GATT_MAX_APPS && (p_dev->gatt_if[i] > 0 || p_dev->listen_gif[i]); i ++)
     {
-        if (p_dev->gatt_if[i] == gatt_if)
+        if (is_initiator)
         {
-            p_dev->gatt_if[i] = 0;
-
-            for (j = i + 1; j < GATT_MAX_APPS; j ++)
-                p_dev->gatt_if[j - 1] = p_dev->gatt_if[j];
-
-            if (p_dev->gatt_if[0] == 0)
+            if (p_dev->gatt_if[i] == gatt_if)
             {
-                ret = BTM_BleUpdateBgConnDev(FALSE, p_dev->remote_bda);
-                memset(p_dev, 0, sizeof(tGATT_BG_CONN_DEV));
-            }
-            else
-                ret = TRUE;
+                p_dev->gatt_if[i] = 0;
+                /* move all element behind one forward */
+                for (j = i + 1; j < GATT_MAX_APPS; j ++)
+                    p_dev->gatt_if[j - 1] = p_dev->gatt_if[j];
 
-            break;
+                if (p_dev->gatt_if[0] == 0)
+                    ret = BTM_BleUpdateBgConnDev(FALSE, p_dev->remote_bda);
+                else
+                    ret = TRUE;
+
+                break;
+            }
         }
+        else
+        {
+            if (p_dev->listen_gif[i] == gatt_if)
+            {
+                p_dev->listen_gif[i] = 0;
+                p_reg->listening --;
+                /* move all element behind one forward */
+                for (j = i + 1; j < GATT_MAX_APPS; j ++)
+                    p_dev->listen_gif[j - 1] = p_dev->listen_gif[j];
+
+                if (p_dev->listen_gif[0] == 0)
+                    ret = BTM_BleUpdateAdvWhitelist(FALSE, p_dev->remote_bda);
+                else
+                    ret = TRUE;
+                break;
+            }
+        }
+    }
+
+    if (i != GATT_MAX_APPS && p_dev->gatt_if[0] == 0 && p_dev->listen_gif[0] == 0)
+    {
+        memset(p_dev, 0, sizeof(tGATT_BG_CONN_DEV));
     }
 
     return ret;
@@ -2445,26 +2519,40 @@ void gatt_deregister_bgdev_list(tGATT_IF gatt_if)
 {
     tGATT_BG_CONN_DEV    *p_dev_list = &gatt_cb.bgconn_dev[0];
     UINT8 i , j, k;
+    tGATT_REG       *p_reg = gatt_get_regcb(gatt_if);
 
+    /* update the BG conn device list */
     for (i = 0 ; i <GATT_MAX_BG_CONN_DEV; i ++, p_dev_list ++ )
     {
         if (p_dev_list->in_use)
         {
             for (j = 0; j < GATT_MAX_APPS; j ++)
             {
-                if (p_dev_list->gatt_if[j] == 0)
+                if (p_dev_list->gatt_if[j] == 0 && p_dev_list->listen_gif[j] == 0)
                     break;
-                else if (p_dev_list->gatt_if[j] == gatt_if)
+
+                if (p_dev_list->gatt_if[j] == gatt_if)
                 {
                     for (k = j + 1; k < GATT_MAX_APPS; k ++)
                         p_dev_list->gatt_if[k - 1] = p_dev_list->gatt_if[k];
 
                     if (p_dev_list->gatt_if[0] == 0)
-                    {
                         BTM_BleUpdateBgConnDev(FALSE, p_dev_list->remote_bda);
-                        memset(p_dev_list, 0, sizeof(tGATT_BG_CONN_DEV));
-                        break;
-                    }
+                }
+
+                if (p_dev_list->listen_gif[j] == gatt_if)
+                {
+                    p_dev_list->listen_gif[j] = 0;
+
+                    if (p_reg != NULL && p_reg->listening > 0)
+                        p_reg->listening --;
+
+                    /* move all element behind one forward */
+                    for (k = j + 1; k < GATT_MAX_APPS; k ++)
+                        p_dev_list->listen_gif[k - 1] = p_dev_list->listen_gif[k];
+
+                    if (p_dev_list->listen_gif[0] == 0)
+                        BTM_BleUpdateAdvWhitelist(FALSE, p_dev_list->remote_bda);
                 }
             }
         }
@@ -2500,9 +2588,9 @@ void gatt_reset_bgdev_list(void)
 ** Returns          TRUE if connection started; FALSE if connection start failure.
 **
 *******************************************************************************/
-BOOLEAN gatt_update_auto_connect_dev (tGATT_IF gatt_if, BOOLEAN add, BD_ADDR bd_addr)
+BOOLEAN gatt_update_auto_connect_dev (tGATT_IF gatt_if, BOOLEAN add, BD_ADDR bd_addr, BOOLEAN is_initator)
 {
-    BOOLEAN         ret = FALSE, exist_dev = FALSE;
+    BOOLEAN         ret = FALSE;
     tGATT_REG        *p_reg;
     tGATT_TCB       *p_tcb = gatt_find_tcb_by_addr(bd_addr);
 
@@ -2516,27 +2604,17 @@ BOOLEAN gatt_update_auto_connect_dev (tGATT_IF gatt_if, BOOLEAN add, BD_ADDR bd_
 
     if (add)
     {
-        /* new device */
-        if (gatt_find_bg_dev(bd_addr))
-            exist_dev = TRUE;
+        ret = gatt_add_bg_dev_list(p_reg, bd_addr, is_initator);
 
-        if (gatt_add_bg_dev_list(gatt_if, bd_addr))
+        if (ret && p_tcb != NULL)
         {
-            if (!exist_dev)
-            {
-                ret = BTM_BleUpdateBgConnDev(TRUE, bd_addr);
-            }
-            else
-                ret = TRUE;
-
             /* if a connected device, update the link holding number */
-            if (p_tcb != NULL)
-                gatt_update_app_use_link_flag(gatt_if, p_tcb, TRUE, TRUE);
+            gatt_update_app_use_link_flag(gatt_if, p_tcb, TRUE, TRUE);
         }
     }
     else
     {
-        ret = gatt_remove_bg_dev_from_list(gatt_if, bd_addr);
+        ret = gatt_remove_bg_dev_from_list(p_reg, bd_addr, is_initator);
     }
     return ret;
 }
@@ -2591,10 +2669,70 @@ UINT16 gatt_get_conn_id (tGATT_IF gatt_if, BD_ADDR bd_addr)
     GATT_TRACE_ERROR1 ("gatt_get_conn_id: not connected- gatt_if: %u", gatt_if);
     return(GATT_INVALID_CONN_ID);
 }
+/*******************************************************************************
+**
+** Function     gatt_add_pending_new_srv_start
+**
+** Description  Add a pending new srv start to the new service start queue
+**
+** Returns    Pointer to the new service start buffer, NULL no buffer available
+**
+*******************************************************************************/
+tGATT_PENDING_ENC_CLCB* gatt_add_pending_enc_channel_clcb(tGATT_TCB *p_tcb, tGATT_CLCB *p_clcb )
+{
+    tGATT_PENDING_ENC_CLCB   *p_buf;
 
+    GATT_TRACE_DEBUG0 ("gatt_add_pending_new_srv_start");
+    if ((p_buf = (tGATT_PENDING_ENC_CLCB *)GKI_getbuf((UINT16)sizeof(tGATT_PENDING_ENC_CLCB))) != NULL)
+    {
+        GATT_TRACE_DEBUG0 ("enqueue a new pending encryption channel clcb");
+        p_buf->p_clcb = p_clcb;
+        GKI_enqueue (&p_tcb->pending_enc_clcb, p_buf);
+    }
+    return p_buf;
+}
+/*******************************************************************************
+**
+** Function     gatt_update_listen_mode
+**
+** Description  update peripheral role listening mode
+**
+** Returns    Pointer to the new service start buffer, NULL no buffer available
+**
+*******************************************************************************/
+void gatt_update_listen_mode(void)
+{
+    UINT8           ii = 0;
+    tGATT_REG       *p_reg = &gatt_cb.cl_rcb[0];
+    UINT8           listening = 0;
+    UINT16          connectability, window, interval;
 
+    for (; ii < GATT_MAX_APPS; ii ++, p_reg ++)
+    {
+        if ( p_reg->in_use && p_reg->listening > listening)
+        {
+            listening = p_reg->listening;
+        }
+    }
 
+    if (listening == GATT_LISTEN_TO_ALL ||
+        listening == GATT_LISTEN_TO_NONE)
+        BTM_BleUpdateAdvFilterPolicy (AP_SCAN_CONN_ALL);
+    else
+        BTM_BleUpdateAdvFilterPolicy (AP_SCAN_CONN_WL);
 
+    connectability = BTM_ReadConnectability (&window, &interval);
+
+    if (listening != GATT_LISTEN_TO_NONE)
+    {
+        connectability |= BTM_BLE_CONNECTABLE;
+    }
+    else
+        connectability &= ~BTM_BLE_CONNECTABLE;
+    /* turning on the adv now */
+    BTM_SetConnectability(connectability, window, interval);
+
+}
 #endif
 
 

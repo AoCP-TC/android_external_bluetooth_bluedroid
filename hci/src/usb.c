@@ -1054,6 +1054,10 @@ uint16_t usb_write(uint16_t msg_id, uint8_t *p_data, uint16_t len)
     CMD_HDR *cmd_hdr;
     static int xmit_count;
 
+    if (usb.handle == NULL) {
+        return 0;
+    }
+
     if(!(xmit_transfer = libusb_alloc_transfer(0)))
     {
         USBERR( "libusb_alloc_tranfer() failed");
@@ -1162,8 +1166,18 @@ void usb_close(void)
 ** Returns         None
 **
 *******************************************************************************/
-void usb_ioctl(usb_ioctl_op_t op, void *p_data)
+void usb_ioctl(userial_ioctl_op_t op, void *p_data)
 {
     return;
 }
+
+const tUSERIAL_IF userial_h4_func_table =
+{
+    usb_init,
+    usb_open,
+    usb_read,
+    usb_write,
+    usb_close,
+    usb_ioctl
+};
 

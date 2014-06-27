@@ -121,6 +121,32 @@ BOOLEAN  GATTS_NVRegister (tGATT_APPL_INFO *p_cb_info)
     return status;
 }
 
+BOOLEAN GATTS_RetrieveServiceList(UINT16 **p_l,UINT16* count)
+{
+    tGATT_HDL_LIST_INFO *p_list_info = &gatt_cb.hdl_list_info;
+    int servCount = p_list_info->count;
+    tGATT_HDL_LIST_ELEM     *p_temp = NULL;
+    int xx = 0;
+
+    UINT16 *p_srvList = (UINT16*) malloc (sizeof(UINT16) * servCount);
+    memset(p_srvList, 0, sizeof(UINT16) * servCount);
+
+    GATT_TRACE_API1("NA Service Count ?: %d", servCount);
+    *p_l= p_list_info->p_first->asgn_range.svc_uuid.uu.uuid16;
+    p_temp=p_list_info->p_first;
+
+    while(p_temp && xx < servCount)
+    {
+        p_srvList[xx++] = p_temp->asgn_range.svc_uuid.uu.uuid16;
+        GATT_TRACE_API1("in the loop, found uuid: 0x%0x", p_srvList[xx - 1]);
+        p_temp = p_temp->p_next;
+    }
+    *count = xx;
+    *p_l = p_srvList;
+    return TRUE;
+}
+
+
 /*******************************************************************************
 **
 ** Function         GATTS_CreateService
@@ -849,6 +875,7 @@ tGATT_STATUS GATTC_Discover (UINT16 conn_id, tGATT_DISC_TYPE disc_type,
             (disc_type == GATT_DISC_SRVC_BY_UUID &&
              p_param->service.len == 0))
         {
+            gatt_clcb_dealloc(p_clcb);
             return GATT_ILLEGAL_PARAMETER;
         }
 
@@ -1292,6 +1319,11 @@ void GATT_Deregister (tGATT_IF gatt_if)
     }
 
     gatt_deregister_bgdev_list(gatt_if);
+    /* update the listen mode */
+#ifdef BLE_PERIPHERAL_MODE_SUPPORT
+    GATT_Listen(gatt_if, FALSE, NULL);
+#endif
+
     memset (p_reg, 0, sizeof(tGATT_REG));
 }
 
@@ -1313,7 +1345,6 @@ void GATT_StartIf (tGATT_IF gatt_if)
 {
     tGATT_REG   *p_reg;
     tGATT_TCB   *p_tcb;
-    //tGATT_CLCB   *p_clcb;
     BD_ADDR     bda;
     UINT8       start_idx, found_idx;
     UINT16      conn_id;
@@ -1326,7 +1357,7 @@ void GATT_StartIf (tGATT_IF gatt_if)
         while (gatt_find_the_connected_bda(start_idx, bda, &found_idx))
         {
             p_tcb = gatt_find_tcb_by_addr(bda);
-            if (p_reg->app_cb.p_conn_cb)
+            if (p_reg->app_cb.p_conn_cb && p_tcb)
             {
                 conn_id = GATT_CREATE_CONN_ID(p_tcb->tcb_idx, gatt_if);
                 (*p_reg->app_cb.p_conn_cb)(gatt_if, bda, conn_id, TRUE, 0);
@@ -1341,7 +1372,8 @@ void GATT_StartIf (tGATT_IF gatt_if)
 **
 ** Function         GATT_Connect
 **
-** Description      This function initiate a connecttion to a ATT server.
+** Description      This function initiate a connecttion to a remote device on GATT
+**                  channel.
 **
 ** Parameters       gatt_if: applicaiton interface
 **                  bd_addr: peer device address.
@@ -1366,7 +1398,7 @@ BOOLEAN GATT_Connect (tGATT_IF gatt_if, BD_ADDR bd_addr, BOOLEAN is_direct){
     if (is_direct)
         status = gatt_act_connect (p_reg, bd_addr);
     else
-        status = gatt_update_auto_connect_dev(gatt_if,TRUE, bd_addr);
+        status = gatt_update_auto_connect_dev(gatt_if,TRUE, bd_addr, TRUE);
 
     return status;
 
@@ -1376,7 +1408,8 @@ BOOLEAN GATT_Connect (tGATT_IF gatt_if, BD_ADDR bd_addr, BOOLEAN is_direct){
 **
 ** Function         GATT_CancelConnect
 **
-** Description      This function initiate a connecttion to a ATT server.
+** Description      This function terminate the connection initaition to a remote
+**                  device on GATT channel.
 **
 ** Parameters       gatt_if: client interface. If 0 used as unconditionally disconnect,
 **                          typically used for direct connection cancellation.
@@ -1454,7 +1487,8 @@ BOOLEAN GATT_CancelConnect (tGATT_IF gatt_if, BD_ADDR bd_addr, BOOLEAN is_direct
 **
 ** Function         GATT_Disconnect
 **
-** Description      This function disconnect a logic channel.
+** Description      This function disconnect the GATT channel for this registered
+**                  application.
 **
 ** Parameters       conn_id: connection identifier.
 **
@@ -1531,7 +1565,7 @@ BOOLEAN GATT_GetConnectionInfor(UINT16 conn_id, tGATT_IF *p_gatt_if, BD_ADDR bd_
 **                   bd_addr: peer device address. (input)
 **                   p_conn_id: connection id  (output)
 **
-** Returns          TRUE the ligical link is connected
+** Returns          TRUE the logical link is connected
 **
 *******************************************************************************/
 BOOLEAN GATT_GetConnIdIfConnected(tGATT_IF gatt_if, BD_ADDR bd_addr, UINT16 *p_conn_id)
@@ -1550,6 +1584,50 @@ BOOLEAN GATT_GetConnIdIfConnected(tGATT_IF gatt_if, BD_ADDR bd_addr, UINT16 *p_c
     return status;
 }
 
-#endif
 
+/*******************************************************************************
+**
+** Function         GATT_Listen
+**
+** Description      This function start or stop LE advertisement and listen for
+**                  connection.
+**
+** Parameters       gatt_if: applicaiton interface
+**                  p_bd_addr: listen for specific address connection, or NULL for
+**                             listen to all device connection.
+**                  start: start or stop listening.
+**
+** Returns          TRUE if advertisement is started; FALSE if adv start failure.
+**
+*******************************************************************************/
+BOOLEAN GATT_Listen (tGATT_IF gatt_if, BOOLEAN start, BD_ADDR_PTR bd_addr)
+{
+    tGATT_REG    *p_reg;
+    BOOLEAN status = TRUE;
+
+    GATT_TRACE_API1 ("GATT_Listen gatt_if=%d", gatt_if);
+
+    /* Make sure app is registered */
+    if ((p_reg = gatt_get_regcb(gatt_if)) == NULL)
+    {
+        GATT_TRACE_ERROR1("GATT_Listen - gatt_if =%d is not registered", gatt_if);
+        return(FALSE);
+    }
+
+    if (bd_addr != NULL)
+    {
+        status = gatt_update_auto_connect_dev(gatt_if,start, bd_addr, FALSE);
+    }
+    else
+    {
+        p_reg->listening = start ? GATT_LISTEN_TO_ALL : GATT_LISTEN_TO_NONE;
+    }
+
+    gatt_update_listen_mode();
+
+    return status;
+
+}
+
+#endif
 

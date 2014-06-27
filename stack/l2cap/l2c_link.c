@@ -98,7 +98,7 @@ BOOLEAN l2c_link_hci_conn_req (BD_ADDR bd_addr)
             if (!btm_dev_support_switch (bd_addr))
                 p_lcb->link_role = HCI_ROLE_SLAVE;
             else
-                p_lcb->link_role = l2cu_get_conn_role(p_lcb);
+                p_lcb->link_role = l2cu_get_conn_role(bd_addr);
         }
 
         /* Tell the other side we accept the connection */
@@ -119,7 +119,7 @@ BOOLEAN l2c_link_hci_conn_req (BD_ADDR bd_addr)
         if (!btm_dev_support_switch (bd_addr))
             p_lcb->link_role = HCI_ROLE_SLAVE;
         else
-            p_lcb->link_role = l2cu_get_conn_role(p_lcb);
+            p_lcb->link_role = l2cu_get_conn_role(bd_addr);
 
         btsnd_hcic_accept_conn (bd_addr, p_lcb->link_role);
 
@@ -133,7 +133,10 @@ BOOLEAN l2c_link_hci_conn_req (BD_ADDR bd_addr)
     }
     else
     {
-        L2CAP_TRACE_ERROR0 ("L2CAP got conn_req while connected");
+        L2CAP_TRACE_ERROR1("L2CAP got conn_req while connected (state:%d). Reject it",
+                p_lcb->link_state);
+        /* Reject the connection with ACL Connection Already exist reason */
+        btsnd_hcic_reject_conn (bd_addr, HCI_ERR_CONNECTION_EXISTS);
     }
     return (FALSE);
 }
@@ -201,6 +204,8 @@ BOOLEAN l2c_link_hci_conn_comp (UINT8 status, UINT16 handle, BD_ADDR p_bda)
                              p_lcb->link_role, FALSE);
         else
             btm_acl_created (ci.bd_addr, NULL, NULL, handle, p_lcb->link_role, FALSE);
+
+        BTM_SetLinkSuperTout (ci.bd_addr, btm_cb.btm_def_link_super_tout);
 
         /* If dedicated bonding do not process any further */
         if (p_lcb->is_bonding)
@@ -326,6 +331,7 @@ void l2c_link_sec_comp (BD_ADDR p_bda, void *p_ref_data, UINT8 status)
 
             case BTM_DELAY_CHECK:
                 /* start a timer - encryption change not received before L2CAP connect req */
+                l2cu_send_peer_connect_rsp(p_ccb, L2CAP_CONN_PENDING, L2CAP_CONN_PENDING);
                 btu_start_timer (&p_ccb->timer_entry, BTU_TTYPE_L2CAP_CHNL, L2CAP_DELAY_CHECK_SM4);
                 return;
 
@@ -372,6 +378,24 @@ BOOLEAN l2c_link_hci_disc_comp (UINT16 handle, UINT8 reason)
             btm_cb.acl_disc_reason = reason;
 
         p_lcb->disc_reason = btm_cb.acl_disc_reason;
+
+        /* if HCI connection is abnormally terminated. which mean that neither
+         LOCAL HOST nor PEER terminated connection properly. In this scenario
+         ACL is already removed for particular link. So Upper layer need to be
+         informed ASAP regarding the removal of ACL  for particular link, once
+         hci_disconnection_complete is received. & Transmit queue need to be
+         immediately flushed for that particular ACL, As the ACL is no more. */
+        if (p_lcb->disc_reason != HCI_ERR_CONN_CAUSE_LOCAL_HOST
+           && p_lcb->disc_reason != HCI_ERR_PEER_USER
+           && btm_cb.acl_disc_reason != HCI_ERR_HOST_REJECT_SECURITY)
+        {
+            L2CAP_TRACE_DEBUG1("l2c_link_hci_disc_comp: disc_reason: 0x%x",
+                              p_lcb->disc_reason);
+            btm_acl_removed (p_lcb->remote_bd_addr);
+
+            while (p_lcb->link_xmit_data_q.p_first)
+                GKI_freebuf (GKI_dequeue (&p_lcb->link_xmit_data_q));
+        }
 
         /* Just in case app decides to try again in the callback context */
         p_lcb->link_state = LST_DISCONNECTING;
@@ -677,7 +701,7 @@ void l2c_link_adjust_allocation (void)
     UINT16      controller_xmit_quota = l2cb.num_lm_acl_bufs;
     UINT16      high_pri_link_quota = L2CAP_HIGH_PRI_MIN_XMIT_QUOTA_A;
 
-    /* If no links active, nothing to do. */
+    /* If no links active, reset buffer quotas and controller buffers */
     if (l2cb.num_links_active == 0)
     {
         l2cb.controller_xmit_window = l2cb.num_lm_acl_bufs;
@@ -1027,7 +1051,6 @@ void l2c_pin_code_request (BD_ADDR bd_addr)
 BOOLEAN l2c_link_check_power_mode (tL2C_LCB *p_lcb)
 {
     tBTM_PM_MODE     mode;
-    tBTM_PM_PWR_MD   pm;
     tL2C_CCB    *p_ccb;
     BOOLEAN need_to_active = FALSE;
 
@@ -1054,29 +1077,10 @@ BOOLEAN l2c_link_check_power_mode (tL2C_LCB *p_lcb)
         /* check power mode */
         if (BTM_ReadPowerMode(p_lcb->remote_bd_addr, &mode) == BTM_SUCCESS)
         {
-            /*
-            if ( mode == BTM_PM_MD_PARK )
-            {
-                L2CAP_TRACE_DEBUG1 ("LCB(0x%x) is in park mode", p_lcb->handle);
-// Coverity:
-// FALSE-POSITIVE error from Coverity test tool. Please do NOT remove following comment.
-// coverity[uninit_use_in_call] False-positive: setting the mode to BTM_PM_MD_ACTIVE only uses settings.mode
-                                the other data members of tBTM_PM_PWR_MD are ignored
-
-                memset((void*)&pm, 0, sizeof(pm));
-                pm.mode = BTM_PM_MD_ACTIVE;
-                BTM_SetPowerMode(BTM_PM_SET_ONLY_ID, p_lcb->remote_bd_addr, &pm);
-                btu_start_timer (&p_lcb->timer_entry,
-                                 BTU_TTYPE_L2CAP_LINK, L2CAP_WAIT_UNPARK_TOUT);
-                return TRUE;
-            }
-            */
             if ( mode == BTM_PM_STS_PENDING )
             {
                 L2CAP_TRACE_DEBUG1 ("LCB(0x%x) is in PM pending state", p_lcb->handle);
 
-                btu_start_timer (&p_lcb->timer_entry,
-                                 BTU_TTYPE_L2CAP_LINK, L2CAP_WAIT_UNPARK_TOUT);
                 return TRUE;
             }
         }
@@ -1409,19 +1413,19 @@ void l2c_link_process_num_completed_pkts (UINT8 *p)
             (*p_lcb->p_nocp_cb)(p_lcb->remote_bd_addr);
         }
 
-#if (BLE_INCLUDED == TRUE)
-        if (p_lcb && p_lcb->is_ble_link)
-            l2cb.controller_le_xmit_window += num_sent;
-        else
-#endif
-        {
-
-            /* Maintain the total window to the controller */
-            l2cb.controller_xmit_window += num_sent;
-        }
-
         if (p_lcb)
         {
+#if (BLE_INCLUDED == TRUE)
+            if (p_lcb->is_ble_link)
+            {
+                l2cb.controller_le_xmit_window += num_sent;
+            }
+            else
+#endif
+            {
+                /* Maintain the total window to the controller */
+                l2cb.controller_xmit_window += num_sent;
+            }
             /* If doing round-robin, adjust communal counts */
             if (p_lcb->link_xmit_quota == 0)
             {

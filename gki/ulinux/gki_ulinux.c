@@ -29,7 +29,7 @@
 #include <stdarg.h>
 #include <errno.h>
 #include <sys/times.h>
-
+#include "btu.h"
 #include <pthread.h>  /* must be 1st header defined  */
 #include <time.h>
 #include "gki_int.h"
@@ -76,6 +76,9 @@
 
 #define WAKE_LOCK_ID "brcm_btld"
 #define PARTIAL_WAKE_LOCK 1
+
+#define WAKE_ON 1
+#define WAKE_OFF 0
 
 #if GKI_DYNAMIC_MEMORY == FALSE
 tGKI_CB   gki_cb;
@@ -311,8 +314,10 @@ UINT8 GKI_create_task (TASKPTR task_entry, UINT8 task_id, INT8 *taskname, UINT16
          {
              /* check if define in gki_int.h is correct for this compile environment! */
              policy = GKI_LINUX_BASE_POLICY;
-#if (GKI_LINUX_BASE_POLICY!=GKI_SCHED_NORMAL)
+#if (GKI_LINUX_BASE_POLICY != GKI_SCHED_NORMAL)
              param.sched_priority = GKI_LINUX_BASE_PRIORITY - task_id - 2;
+#else
+             param.sched_priority = 0;
 #endif
          }
          pthread_setschedparam(gki_cb.os.thread_id[task_id], policy, &param);
@@ -524,7 +529,9 @@ void GKI_shutdown(void)
     if (g_GkiTimerWakeLockOn)
     {
         GKI_TRACE("GKI_shutdown :  release_wake_lock(brcm_btld)");
-        release_wake_lock(WAKE_LOCK_ID);
+        /*TODO: Because of permission issue below API is not able to hold the wake lock*/
+        //release_wake_lock(WAKE_LOCK_ID);
+        btu_hcif_wake_event(WAKE_OFF);
         g_GkiTimerWakeLockOn = 0;
     }
 }
@@ -565,15 +572,19 @@ void gki_system_tick_start_stop_cback(BOOLEAN start)
 
             GKI_TIMER_TRACE(">>> STOP GKI_timer_update(), wake_lock_count:%d", --wake_lock_count);
 
-            release_wake_lock(WAKE_LOCK_ID);
+            /*TODO: Because of permission issue below API is not able to hold the wake lock*/
+            //release_wake_lock(WAKE_LOCK_ID);
+            btu_hcif_wake_event(WAKE_OFF);
+
             g_GkiTimerWakeLockOn = 0;
         }
     }
     else
     {
-        /* restart GKI_timer_update() loop */
-        acquire_wake_lock(PARTIAL_WAKE_LOCK, WAKE_LOCK_ID);
+        /* restart GKI_timer_update() loop TODO: Because of permission issue below API is not able to hold the wake lock*/
+        /*acquire_wake_lock(PARTIAL_WAKE_LOCK, WAKE_LOCK_ID);*/
 
+        btu_hcif_wake_event(WAKE_ON);
         g_GkiTimerWakeLockOn = 1;
         *p_run_cond = GKI_TIMER_TICK_RUN_COND;
 

@@ -1,5 +1,8 @@
 /******************************************************************************
  *
+ *  Copyright (c) 2013, The Linux Foundation. All rights reserved.
+ *  Not a Contribution.
+ *
  *  Copyright (C) 2009-2012 Broadcom Corporation
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
@@ -37,6 +40,7 @@
 #include "utils.h"
 #include "bt_vendor_lib.h"
 #include <sys/prctl.h>
+#include "bt_utils.h"
 
 /******************************************************************************
 **  Constants & Macros
@@ -50,6 +54,10 @@
 #define USERIALDBG(param, ...) {ALOGD(param, ## __VA_ARGS__);}
 #else
 #define USERIALDBG(param, ...) {}
+#endif
+
+#ifndef ENABLE_USERIAL_TIMING_LOGS
+#define ENABLE_USERIAL_TIMING_LOGS FALSE
 #endif
 
 #define MAX_SERIAL_PORT (USERIAL_PORT_3 + 1)
@@ -91,6 +99,29 @@ static volatile uint8_t userial_running = 0;
 **  Static functions
 ******************************************************************************/
 
+#if defined(ENABLE_USERIAL_TIMING_LOGS) && (ENABLE_USERIAL_TIMING_LOGS==TRUE)
+
+static void log_userial_tx_timing(int len)
+{
+    #define USEC_PER_SEC 1000000L
+    static struct timespec prev = {0, 0};
+    struct timespec now, diff;
+    unsigned int diff_us = 0;
+    unsigned int now_us = 0;
+
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    now_us = now.tv_sec*USEC_PER_SEC + now.tv_nsec/1000;
+    diff_us = (now.tv_sec - prev.tv_sec) * USEC_PER_SEC + (now.tv_nsec - prev.tv_nsec)/1000;
+
+    ALOGW("[userial] ts %08d diff : %08d len %d", now_us, diff_us,
+                len);
+
+    prev = now;
+}
+
+#endif
+
+
 /*****************************************************************************
 **   Socket signal functions to wake up userial_read_thread for termination
 **
@@ -124,6 +155,7 @@ static inline int is_signaled(fd_set* set)
 {
     return FD_ISSET(signal_fds[0], set);
 }
+
 
 /*******************************************************************************
 **
@@ -219,6 +251,8 @@ static void *userial_read_thread(void *arg)
     rx_flow_on = TRUE;
     userial_running = 1;
 
+    raise_priority_a2dp(TASK_HIGH_USERIAL_READ);
+
     while (userial_running)
     {
         if (bt_hc_cbacks)
@@ -245,11 +279,15 @@ static void *userial_read_thread(void *arg)
             continue;
         }
 
-
         if (rx_length > 0)
         {
             p_buf->len = (uint16_t)rx_length;
             utils_enqueue(&(userial_cb.rx_q), p_buf);
+
+#ifdef QCOM_BT_SIBS_ENABLE
+            /* Check if received data is IBS data or not */
+            is_recvd_data_signal(&p[0]);
+#endif
             bthc_signal_event(HC_EVENT_RX);
         }
         else /* either 0 or < 0 */
@@ -370,8 +408,10 @@ uint8_t userial_open(uint8_t port)
     if(pthread_getschedparam(userial_cb.read_thread, &policy, &param)==0)
     {
         policy = BTHC_LINUX_BASE_POLICY;
-#if (BTHC_LINUX_BASE_POLICY!=SCHED_NORMAL)
+#if (BTHC_LINUX_BASE_POLICY != SCHED_NORMAL)
         param.sched_priority = BTHC_USERIAL_READ_THREAD_PRIORITY;
+#else
+        param.sched_priority = 0;
 #endif
         result = pthread_setschedparam(userial_cb.read_thread, policy, &param);
         if (result != 0)
@@ -454,6 +494,9 @@ uint16_t userial_write(uint16_t msg_id, uint8_t *p_data, uint16_t len)
 
     while(len != 0)
     {
+#if defined(ENABLE_USERIAL_TIMING_LOGS) && (ENABLE_USERIAL_TIMING_LOGS==TRUE)
+        log_userial_tx_timing(len);
+#endif
         ret = write(userial_cb.fd, p_data+total, len);
         total += ret;
         len -= ret;
@@ -522,9 +565,27 @@ void userial_ioctl(userial_ioctl_op_t op, void *p_data)
                 send_wakeup_signal(USERIAL_RX_FLOW_OFF);
             break;
 
+        case USERIAL_OP_CLK_ON:
+            ioctl(userial_cb.fd, 13);
+            break;
+
+        case USERIAL_OP_CLK_OFF:
+            ioctl(userial_cb.fd, 14);
+            break;
+
         case USERIAL_OP_INIT:
         default:
             break;
     }
 }
+
+const tUSERIAL_IF userial_h4_func_table =
+{
+    userial_init,
+    userial_open,
+    userial_read,
+    userial_write,
+    userial_close,
+    userial_ioctl
+};
 

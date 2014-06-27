@@ -1,6 +1,9 @@
 /******************************************************************************
  *
- *  Copyright (C) 20013 The CyanogenMod Project
+ * Copyright (c) 2013, The Linux Foundation. All rights reserved.
+ * Not a Contribution.
+ *
+ *  Copyright (C) 2004-2012 Broadcom Corporation
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -18,21 +21,26 @@
 
 /******************************************************************************
  *
- *  This is the private file for the message access server (MAS).
+ *  This file contains compile-time configurable constants for MCE
  *
  ******************************************************************************/
-#ifndef BTA_MAS_INT_H
-#define BTA_MAS_INT_H
 
-/*****************************************************************************
-**  Constants and data types
-*****************************************************************************/
+#include "gki.h"
+#include "bta_api.h"
+#include "bd.h"
+#include "bta_mce_api.h"
 
-#define BTA_MAS_DEFAULT_VERSION             0x0100  /* for MAP version 1.0 */
+#ifndef BTA_MCE_SDP_DB_SIZE
+#define BTA_MCE_SDP_DB_SIZE  4500
+#endif
 
-#define BTA_MAS_MSG_TYPE_EMAIL              0x01
-#define BTA_MAS_MSG_TYPE_SMS_GSM            0x02
-#define BTA_MAS_MSG_TYPE_SMS_CDMA           0x04
-#define BTA_MAS_MSG_TYPE_MMS                0x08
+static UINT8 __attribute__ ((aligned(4))) bta_mce_sdp_db_data[BTA_MCE_SDP_DB_SIZE];
 
-#endif /* BTA_MAS_INT_H */
+/* MCE configuration structure */
+const tBTA_MCE_CFG bta_mce_cfg =
+{
+    BTA_MCE_SDP_DB_SIZE,
+    (tSDP_DISCOVERY_DB *)bta_mce_sdp_db_data /* The data buffer to keep SDP database */
+};
+
+tBTA_MCE_CFG *p_bta_mce_cfg = (tBTA_MCE_CFG *) &bta_mce_cfg;

@@ -1,5 +1,8 @@
 /******************************************************************************
  *
+ *  Copyright (c) 2013, The Linux Foundation. All rights reserved.
+ *  Not a Contribution.
+ *
  *  Copyright (C) 2009-2012 Broadcom Corporation
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
@@ -32,10 +35,15 @@
 #include <errno.h>
 #include <stdio.h>
 #include <sys/socket.h>
+#ifdef QCOM_WCN_SSR
+#include <termios.h>
+#include <sys/ioctl.h>
+#endif
 #include "bt_hci_bdroid.h"
 #include "userial.h"
 #include "utils.h"
 #include "bt_vendor_lib.h"
+#include "bt_utils.h"
 
 /******************************************************************************
 **  Constants & Macros
@@ -148,6 +156,8 @@ static void *userial_read_thread(void *arg)
     rx_flow_on = TRUE;
     userial_running = 1;
 
+    raise_priority_a2dp(TASK_HIGH_USERIAL_READ);
+
     while (userial_running)
     {
         /* Initialize the input fd set */
@@ -211,6 +221,39 @@ static void *userial_read_thread(void *arg)
 
     return NULL;    // Compiler friendly
 }
+#ifdef QCOM_WCN_SSR
+/*******************************************************************************
+**
+** Function        userial_dev_inreset
+**
+** Description     checks for H/w reset events
+**
+** Returns         reset status
+**
+*******************************************************************************/
+
+uint8_t userial_dev_inreset()
+{
+    volatile int serial_bits;
+    uint8_t dev_reset_done =0, retry_count = 0;
+     ioctl(userial_cb.fd[CH_EVT], TIOCMGET, &serial_bits);
+     if (serial_bits & TIOCM_OUT2) {
+        while(serial_bits & TIOCM_OUT1) {
+             ALOGW("userial_device in reset \n");
+             utils_delay(2000);
+             retry_count++;
+             ioctl(userial_cb.fd[CH_EVT], TIOCMGET, &serial_bits);
+             if((serial_bits & TIOCM_OUT1))
+                dev_reset_done = 0;
+             else
+                dev_reset_done = 1;
+             if(retry_count == 6)
+               break;
+          }
+     }
+    return dev_reset_done;
+}
+#endif
 
 
 /*****************************************************************************
@@ -226,7 +269,7 @@ static void *userial_read_thread(void *arg)
 ** Returns         TRUE/FALSE
 **
 *******************************************************************************/
-uint8_t userial_init(void)
+uint8_t userial_mct_init(void)
 {
     int idx;
 
@@ -248,7 +291,7 @@ uint8_t userial_init(void)
 ** Returns         TRUE/FALSE
 **
 *******************************************************************************/
-uint8_t userial_open(uint8_t port)
+uint8_t userial_mct_open(uint8_t port)
 {
     struct sched_param param;
     int policy, result;
@@ -318,10 +361,12 @@ uint8_t userial_open(uint8_t port)
     if(pthread_getschedparam(userial_cb.read_thread, &policy, &param)==0)
     {
         policy = BTHC_LINUX_BASE_POLICY;
-#if (BTHC_LINUX_BASE_POLICY!=SCHED_NORMAL)
+#if (BTHC_LINUX_BASE_POLICY != SCHED_NORMAL)
         param.sched_priority = BTHC_USERIAL_READ_THREAD_PRIORITY;
+#else
+        param.sched_priority = 0;
 #endif
-        result=pthread_setschedparam(userial_cb.read_thread,policy,&param);
+        result = pthread_setschedparam(userial_cb.read_thread, policy, &param);
         if (result != 0)
         {
             ALOGW("userial_open: pthread_setschedparam failed (%s)", \
@@ -342,7 +387,7 @@ uint8_t userial_open(uint8_t port)
 **                 copied into p_data.  This may be less than len.
 **
 *******************************************************************************/
-uint16_t  userial_read(uint16_t msg_id, uint8_t *p_buffer, uint16_t len)
+uint16_t  userial_mct_read(uint16_t msg_id, uint8_t *p_buffer, uint16_t len)
 {
     int ret = -1;
     int ch_idx = (msg_id == MSG_HC_TO_STACK_HCI_EVT) ? CH_EVT : CH_ACL_IN;
@@ -364,7 +409,7 @@ uint16_t  userial_read(uint16_t msg_id, uint8_t *p_buffer, uint16_t len)
 **                 may be less than len.
 **
 *******************************************************************************/
-uint16_t userial_write(uint16_t msg_id, uint8_t *p_data, uint16_t len)
+uint16_t userial_mct_write(uint16_t msg_id, uint8_t *p_data, uint16_t len)
 {
     int ret, total = 0;
     int ch_idx = (msg_id == MSG_STACK_TO_HC_HCI_CMD) ? CH_CMD : CH_ACL_OUT;
@@ -388,7 +433,7 @@ uint16_t userial_write(uint16_t msg_id, uint8_t *p_data, uint16_t len)
 ** Returns         None
 **
 *******************************************************************************/
-void userial_close(void)
+void userial_mct_close(void)
 {
     int idx, result;
 
@@ -417,7 +462,7 @@ void userial_close(void)
 ** Returns         None
 **
 *******************************************************************************/
-void userial_ioctl(userial_ioctl_op_t op, void *p_data)
+void userial_mct_ioctl(userial_ioctl_op_t op, void *p_data)
 {
     switch(op)
     {
@@ -436,4 +481,14 @@ void userial_ioctl(userial_ioctl_op_t op, void *p_data)
             break;
     }
 }
+
+const tUSERIAL_IF userial_mct_func_table =
+{
+    userial_mct_init,
+    userial_mct_open,
+    userial_mct_read,
+    userial_mct_write,
+    userial_mct_close,
+    userial_mct_ioctl
+};
 

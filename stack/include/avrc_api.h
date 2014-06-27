@@ -563,7 +563,8 @@ AVRC_API extern void AVRC_Init(void);
 **                  Otherwise, the error code defined by AVRCP 1.4
 **
 *******************************************************************************/
-AVRC_API extern tAVRC_STS AVRC_ParsCommand (tAVRC_MSG *p_msg, tAVRC_COMMAND *p_result, UINT8 *p_buf, UINT16 buf_len);
+AVRC_API extern tAVRC_STS AVRC_ParsCommand (tAVRC_MSG *p_msg, tAVRC_COMMAND *p_result,
+    UINT8 *p_buf, UINT16 buf_len);
 
 /*******************************************************************************
 **
@@ -575,7 +576,8 @@ AVRC_API extern tAVRC_STS AVRC_ParsCommand (tAVRC_MSG *p_msg, tAVRC_COMMAND *p_r
 **                  Otherwise, the error code defined by AVRCP 1.4
 **
 *******************************************************************************/
-AVRC_API extern tAVRC_STS AVRC_ParsResponse (tAVRC_MSG *p_msg, tAVRC_RESPONSE *p_result, UINT8 *p_buf, UINT16 buf_len);
+AVRC_API extern tAVRC_STS AVRC_ParsResponse (tAVRC_MSG *p_msg, tAVRC_RESPONSE *p_result,
+    UINT8 *p_buf, UINT16 buf_len);
 
 /*******************************************************************************
 **
@@ -602,6 +604,21 @@ AVRC_API extern tAVRC_STS AVRC_BldCommand( tAVRC_COMMAND *p_cmd, BT_HDR **pp_pkt
 **
 *******************************************************************************/
 AVRC_API extern tAVRC_STS AVRC_BldResponse( UINT8 handle, tAVRC_RESPONSE *p_rsp, BT_HDR **pp_pkt);
+
+/*******************************************************************************
+**
+** Function         AVRC_BldBrowseResponse
+**
+** Description      This function builds the given AVRCP response to the given
+**                  GKI buffer
+**
+** Returns          AVRC_STS_NO_ERROR, if the response is built successfully
+**                  Otherwise, the error code.
+**
+*******************************************************************************/
+tAVRC_STS AVRC_BldBrowseResponse( UINT8 handle, tAVRC_RESPONSE *p_rsp, BT_HDR **pp_pkt);
+
+
 
 /**************************************************************************
 **

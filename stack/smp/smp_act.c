@@ -36,7 +36,7 @@ const UINT8 smp_association_table[2][SMP_IO_CAP_MAX][SMP_IO_CAP_MAX] =
         {SMP_MODEL_KEY_NOTIF, SMP_MODEL_KEY_NOTIF,  SMP_MODEL_PASSKEY,   SMP_MODEL_ENC_ONLY,    SMP_MODEL_KEY_NOTIF}}, /* keyboard display */
     /* responder */
     {{SMP_MODEL_ENC_ONLY, SMP_MODEL_ENC_ONLY,   SMP_MODEL_KEY_NOTIF, SMP_MODEL_ENC_ONLY,    SMP_MODEL_KEY_NOTIF}, /* Display Only */
-        {SMP_MODEL_ENC_ONLY,  SMP_MODEL_ENC_ONLY,   SMP_MODEL_PASSKEY,   SMP_MODEL_ENC_ONLY,    SMP_MODEL_KEY_NOTIF}, /* SMP_CAP_IO = 1 */
+        {SMP_MODEL_ENC_ONLY,  SMP_MODEL_ENC_ONLY,   SMP_MODEL_KEY_NOTIF,   SMP_MODEL_ENC_ONLY,    SMP_MODEL_KEY_NOTIF}, /* SMP_CAP_IO = 1 */
         {SMP_MODEL_PASSKEY,   SMP_MODEL_PASSKEY,    SMP_MODEL_PASSKEY,   SMP_MODEL_ENC_ONLY,    SMP_MODEL_PASSKEY}, /* keyboard only */
         {SMP_MODEL_ENC_ONLY,  SMP_MODEL_ENC_ONLY,   SMP_MODEL_ENC_ONLY,  SMP_MODEL_ENC_ONLY,    SMP_MODEL_ENC_ONLY},/* No Input No Output */
         {SMP_MODEL_PASSKEY,   SMP_MODEL_PASSKEY,    SMP_MODEL_KEY_NOTIF, SMP_MODEL_ENC_ONLY,    SMP_MODEL_PASSKEY}} /* keyboard display */
@@ -148,6 +148,14 @@ void smp_send_pair_req(tSMP_CB *p_cb, tSMP_INT_DATA *p_data)
 {
     tBTM_SEC_DEV_REC *p_dev_rec = btm_find_dev (p_cb->pairing_bda);
     SMP_TRACE_DEBUG0 ("smp_send_pair_req  ");
+
+#if BLE_INCLUDED == TRUE
+    /* Disable L2CAP connection parameter updates while bonding since
+       some peripherals are not able to revert to fast connection parameters
+       during the start of service discovery. Connection paramter updates
+       get enabled again once service discovery completes. */
+    L2CA_EnableUpdateBleConnParams(p_cb->pairing_bda, FALSE);
+#endif
 
     /* erase all keys when master sends pairing req*/
     if (p_dev_rec)
@@ -323,6 +331,10 @@ void smp_proc_sec_grant(tSMP_CB *p_cb, tSMP_INT_DATA *p_data)
     SMP_TRACE_DEBUG0 ("smp_proc_sec_grant ");
     if (res != SMP_SUCCESS)
     {
+        SMP_TRACE_DEBUG0("smp_proc_sec_grant: res is not success, sending auth_cmpl_evt");
+        //if result is not success, we need to mark the callback event as 0, so that the following callback
+        //doesnt cause another unintended event.
+        p_cb->cb_evt=0;
         smp_sm_event(p_cb, SMP_AUTH_CMPL_EVT, p_data);
     }
     else /*otherwise, start pairing */
@@ -477,8 +489,6 @@ void smp_proc_id_info(tSMP_CB *p_cb, tSMP_INT_DATA *p_data)
 
     SMP_TRACE_DEBUG0 ("smp_proc_id_info ");
     STREAM_TO_ARRAY (p_cb->tk, p, BT_OCTET16_LEN);   /* reuse TK for IRK */
-    /* store the ID key from peer device */
-    btm_sec_save_le_key(p_cb->pairing_bda, BTM_LE_KEY_PID, (tBTM_LE_KEY_VALUE *)&p_cb->tk, TRUE);
 
     smp_key_distribution(p_cb, NULL);
 }
@@ -489,14 +499,17 @@ void smp_proc_id_info(tSMP_CB *p_cb, tSMP_INT_DATA *p_data)
 void smp_proc_id_addr(tSMP_CB *p_cb, tSMP_INT_DATA *p_data)
 {
     UINT8   *p = (UINT8 *)p_data;
-    BD_ADDR    mac_bda;
+    tBTM_LE_PID_KEYS    pid_key;
 
     SMP_TRACE_DEBUG0 ("smp_proc_id_addr  ");
     smp_update_key_mask (p_cb, SMP_SEC_KEY_TYPE_ID, TRUE);
 
-    STREAM_TO_BDADDR(mac_bda, p);
+    STREAM_TO_UINT8(pid_key.addr_type, p);
+    STREAM_TO_BDADDR(pid_key.static_addr, p);
+    memcpy(pid_key.irk, p_cb->tk, BT_OCTET16_LEN);
 
-    /* TODO, update MAC address */
+    /* store the ID key from peer device */
+    btm_sec_save_le_key(p_cb->pairing_bda, BTM_LE_KEY_PID, (tBTM_LE_KEY_VALUE *)&pid_key, TRUE);
 
     smp_key_distribution(p_cb, NULL);
 }
@@ -529,7 +542,11 @@ void smp_proc_compare(tSMP_CB *p_cb, tSMP_INT_DATA *p_data)
     UINT8   reason;
 
     SMP_TRACE_DEBUG0 ("smp_proc_compare  ");
-    if (!memcmp(p_cb->rconfirm, p_data->key.p_data, BT_OCTET16_LEN))
+    if (
+#if SMP_CONFORMANCE_TESTING == TRUE
+        p_cb->skip_test_compare_check ||
+#endif
+        !memcmp(p_cb->rconfirm, p_data->key.p_data, BT_OCTET16_LEN))
     {
         /* compare the max encryption key size, and save the smaller one for the link */
         if ( p_cb->peer_enc_size < p_cb->loc_enc_size)
@@ -602,7 +619,7 @@ void smp_start_enc(tSMP_CB *p_cb, tSMP_INT_DATA *p_data)
 void smp_proc_discard(tSMP_CB *p_cb, tSMP_INT_DATA *p_data)
 {
     SMP_TRACE_DEBUG0 ("smp_proc_discard ");
-    smp_cb_cleanup(p_cb);
+    smp_reset_control_value(p_cb);
 }
 /*******************************************************************************
 ** Function     smp_proc_release_delay
@@ -736,7 +753,7 @@ void smp_decide_asso_model(tSMP_CB *p_cb, tSMP_INT_DATA *p_data)
     tSMP_ASSO_MODEL model = SMP_MODEL_MAX;
     UINT8 int_evt = 0;
     tSMP_KEY key;
-    tSMP_INT_DATA   *p;
+    tSMP_INT_DATA   *p = NULL;
 
     SMP_TRACE_DEBUG3 ("smp_decide_asso_model p_cb->peer_io_caps = %d p_cb->loc_io_caps = %d \
                        p_cb->peer_auth_req = %02x",
@@ -875,7 +892,28 @@ void smp_pairing_cmpl(tSMP_CB *p_cb, tSMP_INT_DATA *p_data)
 void smp_pair_terminate(tSMP_CB *p_cb, tSMP_INT_DATA *p_data)
 {
     SMP_TRACE_DEBUG0 ("smp_pair_terminate ");
-    p_cb->status = SMP_PAIR_FAIL_UNKNOWN;
+
+        p_cb->status = SMP_CONN_TOUT;
+
+    smp_proc_pairing_cmpl(p_cb);
+}
+
+/*******************************************************************************
+** Function         smp_delay_terminate
+** Description      This function is called when connection dropped when smp delay
+**                  timer is still active.
+*******************************************************************************/
+void smp_delay_terminate(tSMP_CB *p_cb, tSMP_INT_DATA *p_data)
+{
+    SMP_TRACE_DEBUG0 ("smp_delay_terminate ");
+
+    btu_stop_timer (&p_cb->rsp_timer_ent);
+
+    /* if remote user terminate connection, keep the previous status */
+    /* this is to avoid reporting reverse status to uplayer */
+    if (p_data->reason != HCI_ERR_PEER_USER)
+        p_cb->status = SMP_CONN_TOUT;
+
     smp_proc_pairing_cmpl(p_cb);
 }
 /*******************************************************************************

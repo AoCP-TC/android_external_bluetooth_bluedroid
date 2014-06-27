@@ -48,7 +48,8 @@ static tGATT_CBACK gatt_profile_cback =
     NULL,
     NULL,
     NULL,
-    gatt_profile_request_cback
+    gatt_profile_request_cback,
+    NULL
 } ;
 
 /*******************************************************************************
@@ -183,7 +184,7 @@ static void gatt_profile_request_cback (UINT16 conn_id, UINT32 trans_id, tGATTS_
             break;
 
         case GATTS_REQ_TYPE_WRITE_EXEC:
-            //case GATT_CMD_WRITE:
+        case GATT_CMD_WRITE:
             ignore = TRUE;
             GATT_TRACE_EVENT0("Ignore GATT_REQ_EXEC_WRITE/WRITE_CMD" );
             break;
@@ -269,7 +270,7 @@ void gatt_profile_db_init (void)
 
     /* start service
     */
-    status = GATTS_StartService (gatt_cb.gatt_if, service_handle, GATT_TRANSPORT_LE_BR_EDR);
+    status = GATTS_StartService (gatt_cb.gatt_if, service_handle, GATTP_TRANSPORT_SUPPORTED );
 
     GATT_TRACE_DEBUG2 ("gatt_profile_db_init:  gatt_if=%d   start status%d",
                        gatt_cb.gatt_if,  status);

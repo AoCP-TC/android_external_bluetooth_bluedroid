@@ -669,7 +669,7 @@ void avdt_scb_hdl_pkt(tAVDT_SCB *p_scb, tAVDT_SCB_EVT *p_data)
 void avdt_scb_drop_pkt(tAVDT_SCB *p_scb, tAVDT_SCB_EVT *p_data)
 {
     GKI_freebuf(p_data->p_pkt);
-    AVDT_TRACE_WARNING0("Dropped incoming media packet");
+    AVDT_TRACE_ERROR0(" avdt_scb_drop_pkt Dropped incoming media packet");
 }
 
 /*******************************************************************************
@@ -817,7 +817,7 @@ void avdt_scb_hdl_setconfig_cmd(tAVDT_SCB *p_scb, tAVDT_SCB_EVT *p_data)
             p_scb->peer_seid = p_data->msg.config_cmd.int_seid;
             memcpy(&p_scb->req_cfg, p_cfg, sizeof(tAVDT_CFG));
             /* call app callback */
-            (*p_scb->cs.p_ctrl_cback)(avdt_scb_to_hdl(p_scb),
+            (*p_scb->cs.p_ctrl_cback)(avdt_scb_to_hdl(p_scb), /* handle of scb- which is same as sep handle of bta_av_cb.p_scb*/
                                       p_scb->p_ccb ? p_scb->p_ccb->peer_addr : NULL,
                                       AVDT_CONFIG_IND_EVT,
                                       (tAVDT_CTRL *) &p_data->msg.config_cmd);
@@ -1213,19 +1213,22 @@ void avdt_scb_hdl_write_req_no_frag(tAVDT_SCB *p_scb, tAVDT_SCB_EVT *p_data)
     }
 
     /* build a media packet */
+    /* Add RTP header if required */
+    if ( !(p_data->apiwrite.opt & AVDT_DATA_OPT_NO_RTP) )
+    {
+        ssrc = avdt_scb_gen_ssrc(p_scb);
 
-    ssrc = avdt_scb_gen_ssrc(p_scb);
+        p_data->apiwrite.p_buf->len += AVDT_MEDIA_HDR_SIZE;
+        p_data->apiwrite.p_buf->offset -= AVDT_MEDIA_HDR_SIZE;
 
-    p_data->apiwrite.p_buf->len += AVDT_MEDIA_HDR_SIZE;
-    p_data->apiwrite.p_buf->offset -= AVDT_MEDIA_HDR_SIZE;
+        p = (UINT8 *)(p_data->apiwrite.p_buf + 1) + p_data->apiwrite.p_buf->offset;
 
-    p = (UINT8 *)(p_data->apiwrite.p_buf + 1) + p_data->apiwrite.p_buf->offset;
-
-    UINT8_TO_BE_STREAM(p, AVDT_MEDIA_OCTET1);
-    UINT8_TO_BE_STREAM(p, p_data->apiwrite.m_pt);
-    UINT16_TO_BE_STREAM(p, p_scb->media_seq);
-    UINT32_TO_BE_STREAM(p, p_data->apiwrite.time_stamp);
-    UINT32_TO_BE_STREAM(p, ssrc);
+        UINT8_TO_BE_STREAM(p, AVDT_MEDIA_OCTET1);
+        UINT8_TO_BE_STREAM(p, p_data->apiwrite.m_pt);
+        UINT16_TO_BE_STREAM(p, p_scb->media_seq);
+        UINT32_TO_BE_STREAM(p, p_data->apiwrite.time_stamp);
+        UINT32_TO_BE_STREAM(p, ssrc);
+    }
 
     p_scb->media_seq++;
 

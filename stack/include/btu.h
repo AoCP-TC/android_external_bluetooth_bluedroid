@@ -152,7 +152,11 @@ typedef void (*tBTU_EVENT_CALLBACK)(BT_HDR *p_hdr);
 #define BTU_TTYPE_BLE_RANDOM_ADDR                   103
 #define BTU_TTYPE_ATT_WAIT_FOR_APP_RSP              104
 #define BTU_TTYPE_ATT_WAIT_FOR_IND_ACK              105
-#define BTU_TTYPE_BLE_SCAN_PARAM_IDLE               106
+
+#define BTU_TTYPE_UCD_TO                            106
+
+/* BTU timer event for TBFC */
+#define BTU_TTYPE_TBFC_RESUME                       107
 
 /* Define the BTU_TASK APPL events
 */
@@ -291,6 +295,7 @@ BTU_API extern void btu_check_bt_sleep (void);
 ************************************
 */
 BTU_API extern void  btu_hcif_process_event (UINT8 controller_id, BT_HDR *p_buf);
+BTU_API extern int  btu_hcif_wake_event (UINT32 state);
 BTU_API extern void  btu_hcif_send_cmd (UINT8 controller_id, BT_HDR *p_msg);
 BTU_API extern void  btu_hcif_send_host_rdy_for_data(void);
 BTU_API extern void  btu_hcif_cmd_timeout (UINT8 controller_id);

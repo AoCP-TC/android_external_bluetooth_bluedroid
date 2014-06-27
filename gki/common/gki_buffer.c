@@ -401,8 +401,11 @@ void *GKI_getbuf (UINT16 size)
         /* Only look at PUBLIC buffer pools (bypass RESTRICTED pools) */
         if (((UINT16)1 << p_cb->pool_list[i]) & p_cb->pool_access_mask)
             continue;
+        if ( size <= p_cb->freeq[p_cb->pool_list[i]].size )
+             Q = &p_cb->freeq[p_cb->pool_list[i]];
+        else
+             continue;
 
-        Q = &p_cb->freeq[p_cb->pool_list[i]];
         if(Q->cur_cnt < Q->total)
         {
 // btla-specific ++
@@ -434,6 +437,7 @@ void *GKI_getbuf (UINT16 size)
 
     GKI_enable();
 
+    GKI_exception (GKI_ERROR_OUT_OF_BUFFERS, "getbuf: out of buffers");
     return (NULL);
 }
 
@@ -460,7 +464,10 @@ void *GKI_getpoolbuf (UINT8 pool_id)
     tGKI_COM_CB *p_cb = &gki_cb.com;
 
     if (pool_id >= GKI_NUM_TOTAL_BUF_POOLS)
+    {
+        GKI_exception(GKI_ERROR_GETPOOLBUF_BAD_QID, "getpoolbuf bad pool");
         return (NULL);
+    }
 
     /* Make sure the buffers aren't disturbed til finished with allocation */
     GKI_disable();

@@ -23,6 +23,10 @@
 
 #include "bta_hh_int.h"
 
+/* if SSR max latency is not defined by remote device, set the default value
+   as half of the link supervision timeout */
+#define BTA_HH_GET_DEF_SSR_MAX_LAT(x)   ((x)>> 1)
+
 /*****************************************************************************
 **  Constants
 *****************************************************************************/
@@ -45,6 +49,48 @@ static const UINT8 bta_hh_mod_key_mask[BTA_HH_MOD_MAX_KEY] =
     BTA_HH_KB_GUI_MASK
 };
 
+/* hid_black_addr_prefix_for_ssr & hid_ssr_max_lat_list_for_iot are used
+   to fix IOP issues of sniff subrate feature */
+static const UINT8 hid_black_addr_prefix_for_ssr[][3] = {
+    {0x00, 0x1B, 0xDC} // ISSC
+};
+
+static const UINT16 hid_ssr_max_lat_list_for_iot[] = {
+    0x0012 // ISSC
+};
+
+
+/*******************************************************************************
+**      Function       dev_blacklisted_for_sniff_subrate
+**
+**      Description    It's used to update SSR parameter such as max latency,
+**                     If device is found in HID blacklist.
+**
+**      Returns        None
+*******************************************************************************/
+static void dev_blacklisted_for_sniff_subrate(BD_ADDR peer_dev, UINT16 *ssr_max_lat)
+{
+    UINT16 old_ssr_max_lat = *ssr_max_lat;
+    int i;
+    int blacklist_size =
+            sizeof(hid_black_addr_prefix_for_ssr)/sizeof(hid_black_addr_prefix_for_ssr[0]);
+    for (i = 0; i < blacklist_size; i++) {
+        if (hid_black_addr_prefix_for_ssr[i][0] == peer_dev[0] &&
+            hid_black_addr_prefix_for_ssr[i][1] == peer_dev[1] &&
+            hid_black_addr_prefix_for_ssr[i][2] == peer_dev[2]) {
+            APPL_TRACE_WARNING6("%02x:%02x:%02x:%02x:%02x:%02x is in blacklist for SSR",
+                    peer_dev[0], peer_dev[1], peer_dev[2], peer_dev[3], peer_dev[4], peer_dev[5]);
+
+            *ssr_max_lat = hid_ssr_max_lat_list_for_iot[i];
+            APPL_TRACE_WARNING2("Max latency is changed from %d to %d", old_ssr_max_lat,
+                        *ssr_max_lat);
+            return;
+        }
+    }
+    APPL_TRACE_DEBUG6("%02x:%02x:%02x:%02x:%02x:%02x is not in blacklist for SSR",
+            peer_dev[0], peer_dev[1], peer_dev[2], peer_dev[3], peer_dev[4], peer_dev[5]);
+}
+
 
 /*******************************************************************************
 **
@@ -61,7 +107,7 @@ UINT8  bta_hh_find_cb(BD_ADDR bda)
     UINT8 xx;
 
     /* See how many active devices there are. */
-    for (xx = 0; xx < BTA_HH_MAX_KNOWN; xx++)
+    for (xx = 0; xx < BTA_HH_MAX_DEVICE; xx++)
     {
         /* check if any active/known devices is a match */
         if ((!bdcmp (bda, bta_hh_cb.kdev[xx].addr) &&
@@ -83,7 +129,7 @@ UINT8  bta_hh_find_cb(BD_ADDR bda)
     }
 
     /* if no active device match, find a spot for it */
-    for (xx = 0; xx < BTA_HH_MAX_KNOWN; xx++)
+    for (xx = 0; xx < BTA_HH_MAX_DEVICE; xx++)
     {
         if (!bta_hh_cb.kdev[xx].in_use)
         {
@@ -91,11 +137,14 @@ UINT8  bta_hh_find_cb(BD_ADDR bda)
             break;
         }
     }
-    /* If device list full, report BTA_HH_MAX_KNOWN */
+    /* If device list full, report BTA_HH_IDX_INVALID */
 #if BTA_HH_DEBUG
     APPL_TRACE_DEBUG2("bta_hh_find_cb:: index = %d while max = %d",
-                        xx, BTA_HH_MAX_KNOWN);
+                        xx, BTA_HH_MAX_DEVICE);
 #endif
+
+    if (xx == BTA_HH_MAX_DEVICE)
+        xx = BTA_HH_IDX_INVALID;
 
     return xx;
 }
@@ -115,7 +164,14 @@ void bta_hh_clean_up_kdev(tBTA_HH_DEV_CB *p_cb)
     UINT8 index;
 
     if (p_cb->hid_handle != BTA_HH_INVALID_HANDLE )
-        bta_hh_cb.cb_index[p_cb->hid_handle] = BTA_HH_MAX_KNOWN;
+    {
+#if BTA_HH_LE_INCLUDED == TRUE
+        if (p_cb->is_le_device)
+            bta_hh_cb.le_cb_index[BTA_HH_GET_LE_CB_IDX(p_cb->hid_handle)] = BTA_HH_IDX_INVALID;
+        else
+#endif
+            bta_hh_cb.cb_index[p_cb->hid_handle] = BTA_HH_IDX_INVALID;
+    }
 
     /* reset device control block */
     index = p_cb->index;                        /* Preserve index for this control block */
@@ -140,7 +196,7 @@ void bta_hh_clean_up_kdev(tBTA_HH_DEV_CB *p_cb)
 **
 *******************************************************************************/
 void bta_hh_update_di_info(tBTA_HH_DEV_CB *p_cb, UINT16 vendor_id, UINT16 product_id,
-                           UINT16 version)
+                           UINT16 version, UINT8 flag)
 {
 #if BTA_HH_DEBUG
     APPL_TRACE_DEBUG3("vendor_id = 0x%2x product_id = 0x%2x version = 0x%2x",
@@ -149,6 +205,9 @@ void bta_hh_update_di_info(tBTA_HH_DEV_CB *p_cb, UINT16 vendor_id, UINT16 produc
     p_cb->dscp_info.vendor_id     =   vendor_id;
     p_cb->dscp_info.product_id    =   product_id;
     p_cb->dscp_info.version       =   version;
+#if (defined BTA_HH_LE_INCLUDED && BTA_HH_LE_INCLUDED == TRUE)
+    p_cb->dscp_info.flag          =   flag;
+#endif
 }
 /*******************************************************************************
 **
@@ -178,15 +237,10 @@ void bta_hh_add_device_to_list(tBTA_HH_DEV_CB *p_cb, UINT8 handle,
     p_cb->sub_class = sub_class;
     p_cb->app_id    = app_id;
 
-    if (ssr_max_latency == HID_SSR_PARAM_INVALID)
-        p_cb->dscp_info.ssr_max_latency = BTA_HH_SSR_MAX_LATENCY_DEF;
-    else
-        p_cb->dscp_info.ssr_max_latency = ssr_max_latency;
+    p_cb->dscp_info.ssr_max_latency = ssr_max_latency;
+    dev_blacklisted_for_sniff_subrate(p_cb->addr, &(p_cb->dscp_info.ssr_max_latency));
 
-    if (ssr_min_tout == HID_SSR_PARAM_INVALID)
-        p_cb->dscp_info.ssr_min_tout = BTA_HH_SSR_MIN_TOUT_DEF;
-    else
-        p_cb->dscp_info.ssr_min_tout = ssr_min_tout;
+    p_cb->dscp_info.ssr_min_tout    = ssr_min_tout;
 
     /* store report descriptor info */
     if ( p_dscp_info)
@@ -386,6 +440,119 @@ void bta_hh_parse_mice_rpt(tBTA_HH_BOOT_RPT *p_mice_data, UINT8 *p_report,
 
 }
 
+/*******************************************************************************
+**
+** Function         bta_hh_read_ssr_param
+**
+** Description      Read the SSR Parameter for the remote device
+**
+** Returns          tBTA_HH_STATUS  operation status
+**
+*******************************************************************************/
+tBTA_HH_STATUS bta_hh_read_ssr_param(BD_ADDR bd_addr, UINT16 *p_max_ssr_lat, UINT16 *p_min_ssr_tout)
+{
+    tBTA_HH_STATUS  status = BTA_HH_ERR;
+    tBTA_HH_CB  *p_cb = &bta_hh_cb;
+    UINT8       i;
+    UINT16      ssr_max_latency;
+    /* lock other GKI task */
+    GKI_sched_lock();
+    for (i = 0; i < BTA_HH_MAX_KNOWN; i ++)
+    {
+        if (memcmp(p_cb->kdev[i].addr, bd_addr, BD_ADDR_LEN) == 0)
+        {
+
+            /* if remote device does not have HIDSSRHostMaxLatency attribute in SDP,
+            set SSR max latency default value here.  */
+            if (p_cb->kdev[i].dscp_info.ssr_max_latency == HID_SSR_PARAM_INVALID)
+            {
+                /* The default is calculated as half of link supervision timeout.*/
+
+                BTM_GetLinkSuperTout(p_cb->kdev[i].addr, &ssr_max_latency) ;
+                ssr_max_latency = BTA_HH_GET_DEF_SSR_MAX_LAT(ssr_max_latency);
+
+                /* per 1.1 spec, if the newly calculated max latency is greater than
+                BTA_HH_SSR_MAX_LATENCY_DEF which is 500ms, use BTA_HH_SSR_MAX_LATENCY_DEF */
+                if (ssr_max_latency > BTA_HH_SSR_MAX_LATENCY_DEF)
+                    ssr_max_latency = BTA_HH_SSR_MAX_LATENCY_DEF;
+
+                * p_max_ssr_lat  = ssr_max_latency;
+            }
+            else
+                * p_max_ssr_lat  = p_cb->kdev[i].dscp_info.ssr_max_latency;
+
+            if (p_cb->kdev[i].dscp_info.ssr_min_tout == HID_SSR_PARAM_INVALID)
+                * p_min_ssr_tout = BTA_HH_SSR_MIN_TOUT_DEF;
+            else
+                * p_min_ssr_tout = p_cb->kdev[i].dscp_info.ssr_min_tout;
+
+            status           = BTA_HH_OK;
+
+            break;
+        }
+    }
+    GKI_sched_unlock();
+
+    return status;
+}
+
+/*******************************************************************************
+**
+** Function         bta_hh_cleanup_disable
+**
+** Description      when disable finished, cleanup control block and send callback
+**
+**
+** Returns          void
+**
+*******************************************************************************/
+void bta_hh_cleanup_disable(tBTA_HH_STATUS status)
+{
+    UINT8   xx;
+    /* free buffer in CB holding report descriptors */
+    for(xx = 0; xx < BTA_HH_MAX_DEVICE; xx ++)
+    {
+        utl_freebuf((void **)&bta_hh_cb.kdev[xx].dscp_info.descriptor.dsc_list);
+    }
+    utl_freebuf((void **)&bta_hh_cb.p_disc_db);
+
+    (* bta_hh_cb.p_cback)(BTA_HH_DISABLE_EVT, (tBTA_HH *)&status);
+    /* all connections are down, no waiting for diconnect */
+    memset(&bta_hh_cb, 0, sizeof(tBTA_HH_CB));
+}
+
+/*******************************************************************************
+**
+** Function         bta_hh_dev_handle_to_cb_idx
+**
+** Description      convert a HID device handle to the device control block index.
+**
+**
+** Returns          UINT8: index of the device control block.
+**
+*******************************************************************************/
+UINT8 bta_hh_dev_handle_to_cb_idx(UINT8 dev_handle)
+{
+    UINT8 index = BTA_HH_IDX_INVALID;
+
+#if BTA_HH_LE_INCLUDED == TRUE
+    if (BTA_HH_IS_LE_DEV_HDL(dev_handle))
+    {
+        if (BTA_HH_IS_LE_DEV_HDL_VALID(dev_handle))
+            index = bta_hh_cb.le_cb_index[BTA_HH_GET_LE_CB_IDX(dev_handle)];
+#if BTA_HH_DEBUG == TRUE
+        APPL_TRACE_DEBUG2("bta_hh_dev_handle_to_cb_idx dev_handle = %d index = %d", dev_handle, index);
+#endif
+    }
+    else
+#endif
+        /* regular HID device checking */
+        if (dev_handle < BTA_HH_MAX_KNOWN )
+        index = bta_hh_cb.cb_index[dev_handle];
+
+    return index;
+
+}
 #if BTA_HH_DEBUG
 /*******************************************************************************
 **
@@ -402,7 +569,7 @@ void bta_hh_trace_dev_db(void)
 
     APPL_TRACE_DEBUG0("bta_hh_trace_dev_db:: Device DB list********************");
 
-    for (xx = 0; xx < BTA_HH_MAX_KNOWN; xx++)
+    for (xx = 0; xx < BTA_HH_MAX_DEVICE; xx++)
     {
         APPL_TRACE_DEBUG3("kdev[%d] in_use[%d]  handle[%d] ",xx,
             bta_hh_cb.kdev[xx].in_use, bta_hh_cb.kdev[xx].hid_handle);

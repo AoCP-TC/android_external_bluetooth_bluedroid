@@ -2,10 +2,8 @@ LOCAL_PATH:= $(call my-dir)
 
 include $(CLEAR_VARS)
 
-ifeq ($(BOARD_USES_ALSA_AUDIO),true)
-ifeq ($(TARGET_QCOM_AUDIO_VARIANT),caf)
+ifneq ($(filter caf bfam,$(TARGET_QCOM_AUDIO_VARIANT)),)
 	LOCAL_CFLAGS += -DSAMPLE_RATE_48K
-endif
 endif
 
 LOCAL_SRC_FILES:= \
@@ -17,7 +15,7 @@ LOCAL_C_INCLUDES+= . \
 	$(bdroid_C_INCLUDES)
 
 LOCAL_SHARED_LIBRARIES := \
-	libcutils
+	libcutils liblog
 
 LOCAL_SHARED_LIBRARIES += \
 	libpower

@@ -23,6 +23,8 @@
 #include <hardware/bt_hh.h>
 #include <stdint.h>
 #include "bta_hh_api.h"
+#include "btu.h"
+
 
 /*******************************************************************************
 **  Constants & Macros
@@ -64,6 +66,9 @@ typedef struct
     BT_HDR                        *p_buf;
     UINT32                        hh_poll_thread_id;
     UINT8                         hh_keep_polling;
+    BOOLEAN                       vup_timer_active;
+    TIMER_LIST_ENT                vup_timer;
+    BOOLEAN                       local_vup; // Indicated locally initiated VUP
 } btif_hh_device_t;
 
 /* Control block to maintain properties of devices */
@@ -72,6 +77,7 @@ typedef struct
     UINT8             dev_handle;
     bt_bdaddr_t       bd_addr;
     tBTA_HH_ATTR_MASK attr_mask;
+    int priority;
 } btif_hh_added_device_t;
 
 /**
@@ -85,6 +91,7 @@ typedef struct
     UINT32                  device_num;
     btif_hh_added_device_t  added_devices[BTIF_HH_MAX_ADDED_DEV];
     btif_hh_device_t        *p_curr_dev;
+    bt_bdaddr_t             connecting_dev_bd_addr;
 } btif_hh_cb_t;
 
 
@@ -96,10 +103,12 @@ extern btif_hh_cb_t btif_hh_cb;
 
 extern btif_hh_device_t *btif_hh_find_connected_dev_by_handle(UINT8 handle);
 extern void btif_hh_remove_device(bt_bdaddr_t bd_addr);
+BOOLEAN btif_hh_add_added_dev(bt_bdaddr_t bda, tBTA_HH_ATTR_MASK attr_mask);
 extern bt_status_t btif_hh_virtual_unplug(bt_bdaddr_t *bd_addr);
 extern void btif_hh_disconnect(bt_bdaddr_t *bd_addr);
 extern void btif_hh_setreport(btif_hh_device_t *p_dev, bthh_report_type_t r_type,
                     UINT16 size, UINT8* report);
+extern void btif_hh_sdp_cmpl_after_bonding(bt_bdaddr_t bdaddr);
 
 BOOLEAN btif_hh_add_added_dev(bt_bdaddr_t bd_addr, tBTA_HH_ATTR_MASK attr_mask);
 

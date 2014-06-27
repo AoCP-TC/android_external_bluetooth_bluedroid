@@ -123,16 +123,6 @@ typedef UINT8 tL2CAP_CHNL_DATA_RATE;
 #define L2C_INVALID_PSM(psm)    (((psm) & 0x0101) != 0x0001)
 #define L2C_IS_VALID_PSM(psm)   (((psm) & 0x0101) == 0x0001)
 
-#if (BLE_INCLUDED == TRUE)
-#define L2CAP_LE_INT_MIN            0x0006
-#define L2CAP_LE_INT_MAX            0x0C80
-#define L2CAP_LE_LATENCY_MAX        500
-#define L2CAP_LE_TIMEOUT_MIN        0x000a
-#define L2CAP_LE_TIMEOUT_MAX        0x0C80
-#define L2CAP_LE_TIMEOUT_DEFAULT    0x07D0
-#endif
-
-
 /*****************************************************************************
 **  Type Definitions
 *****************************************************************************/
@@ -1153,6 +1143,18 @@ L2C_API extern BOOLEAN L2CA_UpdateBleConnParams (BD_ADDR rem_bdRa, UINT16 min_in
 **
 *******************************************************************************/
 L2C_API extern BOOLEAN L2CA_EnableUpdateBleConnParams (BD_ADDR rem_bda, BOOLEAN enable);
+
+/*******************************************************************************
+**
+** Function         L2CA_HandleConnUpdateEvent
+**
+** Description      This function enables the connection update request from remote
+**                  after a successful connection update response is received.
+**
+** Returns          void
+**
+*******************************************************************************/
+L2C_API void L2CA_HandleConnUpdateEvent (UINT16 handle, UINT8 status);
 
 /*******************************************************************************
 **

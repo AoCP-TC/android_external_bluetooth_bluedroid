@@ -136,6 +136,28 @@ void l2cu_release_lcb (tL2C_LCB *p_lcb)
     btm_remove_sco_links(p_lcb->remote_bd_addr);
 #endif
 
+    if (p_lcb->sent_not_acked > 0)
+    {
+#if (BLE_INCLUDED == TRUE)
+        if (p_lcb->is_ble_link)
+        {
+            l2cb.controller_le_xmit_window += p_lcb->sent_not_acked;
+            if (l2cb.controller_le_xmit_window > l2cb.num_lm_ble_bufs)
+            {
+                l2cb.controller_le_xmit_window = l2cb.num_lm_ble_bufs;
+            }
+        }
+        else
+#endif
+        {
+            l2cb.controller_xmit_window += p_lcb->sent_not_acked;
+            if (l2cb.controller_xmit_window > l2cb.num_lm_acl_bufs)
+            {
+                l2cb.controller_xmit_window = l2cb.num_lm_acl_bufs;
+            }
+        }
+    }
+
 #if (BLE_INCLUDED == TRUE)
     p_lcb->is_ble_link = FALSE;
     l2cb.is_ble_connecting = FALSE;
@@ -230,6 +252,8 @@ tL2C_LCB  *l2cu_find_lcb_by_bd_addr (BD_ADDR p_bd_addr)
 ** Function         l2cu_get_conn_role
 **
 ** Description      Determine the desired role (master or slave) of a link.
+**                  If it is the previous connected remote device, use the same
+**                  role as previous used role.
 **                  If already got a slave link, this one must be a master. If
 **                  already got at least 1 link where we are the master, make this
 **                  also a master.
@@ -237,8 +261,17 @@ tL2C_LCB  *l2cu_find_lcb_by_bd_addr (BD_ADDR p_bd_addr)
 ** Returns          HCI_ROLE_MASTER or HCI_ROLE_SLAVE
 **
 *******************************************************************************/
-UINT8 l2cu_get_conn_role (tL2C_LCB *p_this_lcb)
+UINT8 l2cu_get_conn_role (BD_ADDR bd_addr)
 {
+    UINT8 i;
+    for (i = 0; i < BTM_ROLE_DEVICE_NUM; i++) {
+        if ((btm_cb.previous_connected_role[i] != BTM_ROLE_UNDEFINED) &&
+            (!bdcmp(bd_addr, btm_cb.previous_connected_remote_addr[i]))) {
+            L2CAP_TRACE_WARNING1 ("l2cu_get_conn_role %d",
+                                  btm_cb.previous_connected_role[i]);
+            return btm_cb.previous_connected_role[i];
+        }
+    }
     return l2cb.desire_role;
 }
 
@@ -307,13 +340,6 @@ BT_HDR *l2cu_build_header (tL2C_LCB *p_lcb, UINT16 len, UINT8 cmd, UINT8 id)
 *******************************************************************************/
 void l2cu_adj_id (tL2C_LCB *p_lcb, UINT8 adj_mask)
 {
-#if (L2CAP_ENHANCED_FEATURES != 0)
-    if ((adj_mask & L2CAP_ADJ_BRCM_ID) && p_lcb->id == L2CAP_FEATURE_REQ_ID)
-    {
-        p_lcb->id++;
-    }
-#endif
-
     if ((adj_mask & L2CAP_ADJ_ZERO_ID) && !p_lcb->id)
     {
         p_lcb->id++;
@@ -1546,6 +1572,9 @@ void l2cu_release_ccb (tL2C_CCB *p_ccb)
     {
         btm_sec_clr_service_by_psm(p_rcb->psm);
     }
+
+    btm_sec_clr_temp_auth_service (p_lcb->remote_bd_addr);
+
     /* Stop the timer */
     btu_stop_timer (&p_ccb->timer_entry);
 
@@ -2056,6 +2085,9 @@ void l2cu_device_reset (void)
             l2c_link_hci_disc_comp (p_lcb->handle, (UINT8) -1);
         }
     }
+#if (BLE_INCLUDED == TRUE)
+    l2cb.is_ble_connecting = FALSE;
+#endif
 }
 
 #if (TCS_WUG_MEMBER_INCLUDED == TRUE && TCS_INCLUDED == TRUE)
@@ -2087,6 +2119,9 @@ BOOLEAN l2cu_create_conn (tL2C_LCB *p_lcb)
 
     if (dev_type == BT_DEVICE_TYPE_BLE)
     {
+        if (!HCI_LE_HOST_SUPPORTED(btm_cb.devcb.local_lmp_features[HCI_EXT_FEATURES_PAGE_1]))
+            return FALSE;
+
         p_lcb->ble_addr_type = addr_type;
         p_lcb->is_ble_link   = TRUE;
 
@@ -2119,7 +2154,7 @@ BOOLEAN l2cu_create_conn (tL2C_LCB *p_lcb)
                 continue; /* No Master Slave switch not allowed when SCO Active */
 #endif
 
-            if (HCI_SWITCH_SUPPORTED(btm_cb.devcb.local_features))
+            if (HCI_SWITCH_SUPPORTED(BTM_ReadLocalFeatures()))
             {
                 /* mark this lcb waiting for switch to be completed and
                    start switch on the other one */
@@ -2235,7 +2270,9 @@ BOOLEAN l2cu_create_conn_after_switch (tL2C_LCB *p_lcb)
 #endif
 
     if (!btsnd_hcic_create_conn (p_lcb->remote_bd_addr,
-                                 HCI_PKT_TYPES_MASK_DM1 + HCI_PKT_TYPES_MASK_DH1,
+                                 ( HCI_PKT_TYPES_MASK_DM1 + HCI_PKT_TYPES_MASK_DH1
+                                 + HCI_PKT_TYPES_MASK_DM3 + HCI_PKT_TYPES_MASK_DH3
+                                 + HCI_PKT_TYPES_MASK_DM5 + HCI_PKT_TYPES_MASK_DH5 ),
                                  page_scan_rep_mode,
                                  page_scan_mode,
                                  clock_offset,
@@ -2390,153 +2427,6 @@ BOOLEAN l2cu_set_acl_priority (BD_ADDR bd_addr, UINT8 priority, BOOLEAN reset_af
     }
     return(TRUE);
 }
-
-#if (L2CAP_ENHANCED_FEATURES != 0)
-/*******************************************************************************
-**
-** Function         l2cu_send_feature_req
-**
-** Description      Called at connection establishment by the originator
-**                  of the connection to send an L2CAP Echo request message
-**                  to the peer to determine if he supports Widcomm proprietary
-**                  features.
-**
-** Returns          void
-**
-*******************************************************************************/
-void l2cu_send_feature_req (tL2C_CCB *p_ccb)
-{
-    UINT8     saved_id;
-    UINT8     buff[100], *p = buff;
-
-    UINT8_TO_STREAM (p, 'R');
-    UINT8_TO_STREAM (p, 'Q');
-
-    UINT8_TO_STREAM (p, 'r');
-    UINT8_TO_STREAM (p, 'q');
-
-    /* save current ID to be restored after feature request */
-    saved_id = p_ccb->p_lcb->id;
-
-    /* Set appropriate ID */
-    p_ccb->p_lcb->id               = L2CAP_FEATURE_REQ_ID - 1;
-
-    l2cu_send_peer_echo_req (p_ccb->p_lcb, buff, (UINT16)(p - buff));
-
-    /* packet has been built so we can restore the control block id */
-    p_ccb->p_lcb->id = saved_id;
-}
-
-
-
-/*******************************************************************************
-**
-** Function         l2cu_check_feature_req
-**
-** Description      Called when an echo request is received to check if the
-**                  other side is doing a proprietary feature request. If so,
-**                  extract the values and reply with a features response.
-**
-** Returns          void
-**
-*******************************************************************************/
-BOOLEAN l2cu_check_feature_req (tL2C_LCB *p_lcb, UINT8 id, UINT8 *p_data, UINT16 data_len)
-{
-    UINT8   buff[100];
-    UINT8   *p_out           = buff;
-    UINT8   *p_end           = p_data + data_len - 2;
-    UINT8   pe_type, pe_len;
-
-    if ((data_len <= 4)
-     || (p_data[0] != 'R')
-     || (p_data[1] != 'Q')
-     || (p_data[data_len - 2] != 'r')
-     || (p_data[data_len - 1] != 'q')
-     || (id != L2CAP_FEATURE_REQ_ID))
-        return (FALSE);
-
-    /* Skip leading frame characters */
-    p_data += 2;
-
-    UINT8_TO_STREAM (p_out, 'R');
-    UINT8_TO_STREAM (p_out, 'S');
-
-    while (p_data < p_end)
-    {
-        pe_type  = *p_data++;
-        pe_len   = *p_data++;
-
-        switch (pe_type)
-        {
-        default:
-            p_data += pe_len;
-            break;
-        }
-    }
-
-    /* Sanity check - we should not overrun the input */
-    if (p_data != p_end)
-    {
-        L2CAP_TRACE_ERROR0 ("L2CAP - badly formatted feature req");
-        return (FALSE);
-    }
-
-    UINT8_TO_STREAM (p_out, 'r');
-    UINT8_TO_STREAM (p_out, 's');
-
-    l2cu_send_peer_echo_rsp (p_lcb, L2CAP_FEATURE_RSP_ID, buff, (UINT16)(p_out - buff));
-
-    return (TRUE);
-}
-
-/*******************************************************************************
-**
-** Function         l2cu_check_feature_rsp
-**
-** Description      Called when an echo response is received to check if the
-**                  other side is suports proprietary feature(s). If so,
-**                  extract the values.
-**
-** Returns          void
-**
-*******************************************************************************/
-void l2cu_check_feature_rsp (tL2C_LCB *p_lcb, UINT8 id, UINT8 *p_data, UINT16 data_len)
-{
-    UINT8       *p_end = p_data + data_len - 2;
-
-     if ((data_len <= 4)
-       || (p_data[0] != 'R')
-       || (p_data[1] != 'S')
-       || (p_data[data_len - 2] != 'r')
-       || (p_data[data_len - 1] != 's')
-       || (id != L2CAP_FEATURE_RSP_ID))
-    {
-        return;
-    }
-
-    /* Skip leading frame characters */
-    p_data += 2;
-
-    while (p_data < p_end)
-    {
-        UINT8   pe_id  = *p_data++;
-        UINT8   pe_len = *p_data++;
-
-        switch (pe_id)
-        {
-        default:
-            p_data += pe_len;
-            break;
-        }
-    }
-
-    /* Sanity check - we should not overrun the input */
-    if (p_data != p_end)
-    {
-        L2CAP_TRACE_ERROR0 ("L2CAP - badly formatted feature rsp");
-    }
-}
-#endif /* L2CAP_ENHANCED_FEATURES != 0 */
 
 #if (L2CAP_NON_FLUSHABLE_PB_INCLUDED == TRUE)
 /******************************************************************************
@@ -2697,6 +2587,8 @@ BOOLEAN l2cu_initialize_fixed_ccb (tL2C_LCB *p_lcb, UINT16 fixed_cid, tL2CAP_FCR
     if ((p_ccb = l2cu_allocate_ccb (NULL, 0)) == NULL)
         return (FALSE);
 
+    btu_stop_timer(&p_lcb->timer_entry);
+
     /* Set CID for the connection */
     p_ccb->local_cid  = fixed_cid;
     p_ccb->remote_cid = fixed_cid;
@@ -2836,11 +2728,15 @@ void l2cu_process_fixed_chnl_resp (tL2C_LCB *p_lcb)
 
                 (*l2cb.fixed_reg[xx].pL2CA_FixedConn_Cb)(p_lcb->remote_bd_addr, TRUE, reason);
             }
-            else if (p_lcb->p_fixed_ccbs[xx])
+            else
             {
                 (*l2cb.fixed_reg[xx].pL2CA_FixedConn_Cb)(p_lcb->remote_bd_addr, FALSE, p_lcb->disc_reason);
-                l2cu_release_ccb (p_lcb->p_fixed_ccbs[xx]);
-                p_lcb->p_fixed_ccbs[xx] = NULL;
+
+                if (p_lcb->p_fixed_ccbs[xx])
+                {
+                    l2cu_release_ccb (p_lcb->p_fixed_ccbs[xx]);
+                    p_lcb->p_fixed_ccbs[xx] = NULL;
+                }
             }
         }
     }
@@ -3219,6 +3115,11 @@ BT_HDR *l2cu_get_next_buffer_to_send (tL2C_LCB *p_lcb)
             if (p_ccb->xmit_hold_q.count != 0)
             {
                 p_buf = (BT_HDR *)GKI_dequeue (&p_ccb->xmit_hold_q);
+                if(NULL == p_buf)
+                {
+                    L2CAP_TRACE_ERROR0("l2cu_get_buffer_to_send: No data to be sent");
+                    return (NULL);
+                }
                 l2cu_set_acl_hci_header (p_buf, p_ccb);
                 return (p_buf);
             }
@@ -3245,6 +3146,11 @@ BT_HDR *l2cu_get_next_buffer_to_send (tL2C_LCB *p_lcb)
     else
     {
         p_buf = (BT_HDR *)GKI_dequeue (&p_ccb->xmit_hold_q);
+        if(NULL == p_buf)
+        {
+            L2CAP_TRACE_ERROR0("l2cu_get_buffer_to_send() #2: No data to be sent");
+            return (NULL);
+        }
     }
 
     if ( p_ccb->p_rcb && p_ccb->p_rcb->api.pL2CA_TxComplete_Cb && (p_ccb->peer_cfg.fcr.mode != L2CAP_FCR_ERTM_MODE) )
@@ -3382,7 +3288,7 @@ void l2cu_check_channel_congestion (tL2C_CCB *p_ccb)
                 p_ccb->cong_sent = TRUE;
                 if (p_ccb->p_rcb->api.pL2CA_CongestionStatus_Cb)
                 {
-                    L2CAP_TRACE_DEBUG3 ("L2CAP - Calling CongestionStatus_Cb (TRUE),CID:0x%04x,XmitQ:%u,Quota:%u",
+                    L2CAP_TRACE_WARNING3 ("L2CAP - Calling CongestionStatus_Cb (TRUE),CID:0x%04x,XmitQ:%u,Quota:%u",
                         p_ccb->local_cid, q_count, p_ccb->buff_quota);
 
                     (*p_ccb->p_rcb->api.pL2CA_CongestionStatus_Cb)(p_ccb->local_cid, TRUE);

@@ -80,10 +80,10 @@ typedef enum {
  *      Typecasting conversion: (int (*)[]) param.
  *  [return]
  *      Numbers of opened file descriptors.
-     *      Valid number:
-     *          1 - CMD/EVT/ACL-In/ACL-Out via the same fd (e.g. UART)
-     *          2 - CMD/EVT on one fd, and ACL-In/ACL-Out on the other fd
-     *          4 - CMD, EVT, ACL-In, ACL-Out are on their individual fd
+ *      Valid number:
+ *          1 - CMD/EVT/ACL-In/ACL-Out via the same fd (e.g. UART)
+ *          2 - CMD/EVT on one fd, and ACL-In/ACL-Out on the other fd
+ *          4 - CMD, EVT, ACL-In, ACL-Out are on their individual fd
  *  [callback]
  *      None.
  */
@@ -141,6 +141,24 @@ typedef enum {
  *      None.
  */
     BT_VND_OP_LPM_WAKE_SET_STATE,
+
+/*  [operation]
+ *      The epilog call to the vendor module so that it can perform any
+ *      vendor-specific processes (e.g. send a HCI_RESET to BT Controller)
+ *      before the caller calls for cleanup().
+ *  [input param]
+ *      None.
+ *  [return]
+ *      0 - default, don't care.
+ *  [callback]
+ *      Must call epilog_cb to notify the stack of the completion of vendor
+ *      specific epilog process once it has been done.
+ */
+    BT_VND_OP_EPILOG,
+
+    BT_VND_OP_ANT_USERIAL_OPEN,
+
+    BT_VND_OP_ANT_USERIAL_CLOSE,
 } bt_vendor_opcode_t;
 
 /** Power on/off control states */
@@ -254,6 +272,15 @@ typedef void (*tINT_CMD_CBACK)(void *p_mem);
  */
 typedef uint8_t (*cmd_xmit_cb)(uint16_t opcode, void *p_buf, tINT_CMD_CBACK p_cback);
 
+#ifdef QCOM_BT_SIBS_ENABLE
+/* BT low power mode set state callback
+ *
+ * Vendor lib calls lpm_set_state_cb function in order to wake up the SOC
+ * from sleep or to allow the SOC to enter into sleep.
+ */
+typedef void (*lpm_set_state_cb)(bt_vendor_lpm_wake_state_t state);
+#endif
+
 typedef struct {
     /** set to sizeof(bt_vendor_callbacks_t) */
     size_t         size;
@@ -280,6 +307,14 @@ typedef struct {
 
     /* hci command packet transmit request */
     cmd_xmit_cb xmit_cb;
+
+    /* notifies caller completion of epilog process */
+    cfg_result_cb epilog_cb;
+
+#ifdef QCOM_BT_SIBS_ENABLE
+    /* indicates the user to wake-up or to enter into sleep */
+    lpm_set_state_cb lpm_set_state_cb;
+#endif
 } bt_vendor_callbacks_t;
 
 /*
@@ -304,6 +339,13 @@ typedef struct {
 
     /** Closes the interface */
     void  (*cleanup)(void);
+
+#if (BLUETOOTH_QCOM_SW == TRUE)
+    /** SSR cleanup is used in HW reset cases
+     * which would cloese all the client channels
+     * and turns off the chip*/
+    void  (*ssr_cleanup)(void);
+#endif
 } bt_vendor_interface_t;
 
 

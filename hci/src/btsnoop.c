@@ -39,6 +39,8 @@
 #include <netinet/in.h>
 #include <netdb.h>
 
+/* for localtime_r */
+#include <time.h>
 /* for gettimeofday */
 #include <sys/time.h>
 /* for the S_* open parameters */
@@ -117,6 +119,10 @@ do {                                                                            
 #define BTSNOOP_EPOCH_HI 0x00dcddb3U
 #define BTSNOOP_EPOCH_LO 0x0f2f8000U
 
+typedef void (*t_HciPacketCallback)(HC_BT_HDR *p_buf);
+void btsnoop_reg(t_HciPacketCallback p_callback);
+t_HciPacketCallback p_HciPacketCallback;
+
 /*******************************************************************************
  **
  ** Function         tv_to_btsnoop_ts
@@ -148,6 +154,12 @@ static void tv_to_btsnoop_ts(uint32_t *out_lo, uint32_t *out_hi, struct timeval 
     /* add the epoch */
     HCIDISP_ADD_64(BTSNOOP_EPOCH_LO, BTSNOOP_EPOCH_HI, *out_lo, *out_hi);
 }
+
+void btsnoop_reg(t_HciPacketCallback p_callback)
+{
+      p_HciPacketCallback = p_callback;
+}
+
 
 /*******************************************************************************
  **
@@ -444,7 +456,7 @@ void btsnoop_acl_data(uint8_t *p, uint8_t is_rcvd)
 static pthread_t thread_id;
 static int s_listen = -1;
 static int ext_parser_fd = -1;
-
+static long int gmt_offset;
 static void ext_parser_detached(void);
 
 static int ext_parser_accept(int port)
@@ -496,7 +508,7 @@ static int ext_parser_accept(int port)
     s = accept(s_listen, (struct sockaddr *) &cliaddr, &clilen);
 
     if (s < 0)
-{
+    {
         perror("accept");
         return -1;
     }
@@ -509,15 +521,38 @@ static int ext_parser_accept(int port)
 static int send_ext_parser(char *p, int len)
 {
     int n;
+    struct timeval tv;
+    uint32_t value_hi;
+    uint32_t value;
+
+    utils_lock();
+
+    /* time */
+    gettimeofday(&tv, NULL);
+    /* convert to local time to better match with logcat
+     * time stamp.
+     */
+    tv.tv_sec += gmt_offset;
+    tv_to_btsnoop_ts(&value, &value_hi, &tv);
+
+    value_hi = l_to_be(value_hi);
+    value = l_to_be(value);
 
     /* check if io socket is connected */
     if (ext_parser_fd == -1)
+    {
+        utils_unlock();
         return 0;
+    }
+
+    write(ext_parser_fd, &value_hi, 4);
+    write(ext_parser_fd, &value, 4);
 
     SNOOPDBG("write %d to snoop socket\n", len);
 
     n = write(ext_parser_fd, p, len);
 
+    utils_unlock();
     if (n<=0)
     {
         ext_parser_detached();
@@ -548,9 +583,10 @@ static void interruptFn (int sig)
 
 static void ext_parser_thread(void* param)
 {
-    int fd;
+    int fd, ret;
     int sig = SIGUSR2;
     sigset_t sigSet;
+    char buf[4];
     sigemptyset (&sigSet);
     sigaddset (&sigSet, sig);
 
@@ -571,19 +607,36 @@ static void ext_parser_thread(void* param)
         ext_parser_fd = fd;
 
         ALOGD("ext parser attached on fd %d\n", ext_parser_fd);
+        /* No incoming data expected on this socket, block
+         * on read would return only on socket close.
+         * After this subsequent connection can be serviced.
+         */
+        ret = read (fd, buf, 4);
+        ALOGD("Read returned %d\n", ret);
+        if (ret == -1)
+        {
+            ALOGD("Error :%s\n", strerror(errno));
+        }
+        ext_parser_detached();
     } while (1);
 }
 
 void btsnoop_stop_listener(void)
 {
-    ALOGD("btsnoop_init");
+    ALOGD("btsnoop_stop_listener");
     ext_parser_detached();
 }
 
 void btsnoop_init(void)
 {
+    time_t t = time(NULL);
+    struct tm tm_cur = {0};
 #if defined(BTSNOOP_EXT_PARSER_INCLUDED) && (BTSNOOP_EXT_PARSER_INCLUDED == TRUE)
     ALOGD("btsnoop_init");
+
+    localtime_r (&t, &tm_cur);
+    SNOOPDBG("Time GMT offset %d\n", tm_cur.tm_gmtoff);
+    gmt_offset = tm_cur.tm_gmtoff;
 
     /* always setup ext listener port */
     if (pthread_create(&thread_id, NULL,
@@ -631,13 +684,18 @@ void btsnoop_capture(HC_BT_HDR *p_buf, uint8_t is_rcvd)
     SNOOPDBG("btsnoop_capture: fd = %d, type %x, rcvd %d, ext %d", \
              hci_btsnoop_fd, p_buf->event, is_rcvd, ext_parser_fd);
 
+    if (p_HciPacketCallback) {
+        p_HciPacketCallback(p_buf);
+    }
+
 #if defined(BTSNOOP_EXT_PARSER_INCLUDED) && (BTSNOOP_EXT_PARSER_INCLUDED == TRUE)
     if (ext_parser_fd > 0)
     {
-        uint8_t tmp = *p;
+        uint8_t tmp, tmp_hndl_hi = 0xFF;
 
         /* borrow one byte for H4 packet type indicator */
         p--;
+        tmp = *p;
 
         switch (p_buf->event & MSG_EVT_MASK)
         {
@@ -647,6 +705,12 @@ void btsnoop_capture(HC_BT_HDR *p_buf, uint8_t is_rcvd)
               case MSG_HC_TO_STACK_HCI_ACL:
               case MSG_STACK_TO_HC_HCI_ACL:
                   *p = HCIT_TYPE_ACL_DATA;
+                  tmp_hndl_hi = p[2];
+                  /* Insert ACL packet direction information for external parser
+                   * in the upper bit of HCI handle which is not used.
+                   */
+                  p[2] = ((p_buf->event & MSG_EVT_MASK) == MSG_HC_TO_STACK_HCI_ACL) ?
+                            p[2] | 0x80 :  p[2] & 0x7F;
                   break;
               case MSG_HC_TO_STACK_HCI_SCO:
               case MSG_STACK_TO_HC_HCI_SCO:
@@ -658,7 +722,12 @@ void btsnoop_capture(HC_BT_HDR *p_buf, uint8_t is_rcvd)
         }
 
         send_ext_parser((char*)p, p_buf->len+1);
-        *(++p) = tmp;
+        if (tmp_hndl_hi != 0xFF)
+        {
+            p[2] = tmp_hndl_hi;
+        }
+        *p = tmp;
+        p++;
         return;
     }
 #endif
@@ -690,5 +759,4 @@ void btsnoop_capture(HC_BT_HDR *p_buf, uint8_t is_rcvd)
     }
 #endif // BTSNOOPDISP_INCLUDED
 }
-
 

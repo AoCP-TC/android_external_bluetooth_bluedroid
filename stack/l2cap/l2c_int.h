@@ -435,11 +435,11 @@ typedef struct t_l2c_linkcb
     BOOLEAN             is_ble_link;
     tBLE_ADDR_TYPE      ble_addr_type;
 
-#define UPD_ENABLED     0  /* If peer requests update, we will change params */
-#define UPD_DISABLED    1  /* application requested not to update */
-#define UPD_PENDING     2  /* while updates are disabled, peer requested new parameters */
-#define UPD_UPDATED     3  /* peer updated connection parameters */
-    UINT8               upd_disabled;
+#define L2C_BLE_CONN_UPDATE_DISABLE 0x1  /* disable update connection parameters */
+#define L2C_BLE_NEW_CONN_PARAM      0x2  /* new connection parameter to be set */
+#define L2C_BLE_UPDATE_PENDING      0x4  /* waiting for connection update finished */
+#define L2C_BLE_NOT_DEFAULT_PARAM   0x8  /* not using default connection parameters */
+    UINT8               upd_status;
 
     UINT16              min_interval; /* parameters as requested by peripheral */
     UINT16              max_interval;
@@ -585,7 +585,7 @@ extern tL2C_LCB *l2cu_find_lcb_by_bd_addr (BD_ADDR p_bd_addr);
 extern tL2C_LCB *l2cu_find_lcb_by_handle (UINT16 handle);
 extern void     l2cu_update_lcb_4_bonding (BD_ADDR p_bd_addr, BOOLEAN is_bonding);
 
-extern UINT8    l2cu_get_conn_role (tL2C_LCB *p_this_lcb);
+extern UINT8    l2cu_get_conn_role (BD_ADDR bd_addr);
 extern BOOLEAN  l2cu_set_acl_priority (BD_ADDR bd_addr, UINT8 priority, BOOLEAN reset_after_rs);
 
 extern void     l2cu_enqueue_ccb (tL2C_CCB *p_ccb);
@@ -761,6 +761,7 @@ extern BOOLEAN l2cble_create_conn (tL2C_LCB *p_lcb);
 extern void l2cble_process_sig_cmd (tL2C_LCB *p_lcb, UINT8 *p, UINT16 pkt_len);
 extern void l2cble_conn_comp (UINT16 handle, UINT8 role, BD_ADDR bda, tBLE_ADDR_TYPE type,
                               UINT16 conn_interval, UINT16 conn_latency, UINT16 conn_timeout);
+extern BOOLEAN l2cble_init_direct_conn (tL2C_LCB *p_lcb);
 
 #endif
 

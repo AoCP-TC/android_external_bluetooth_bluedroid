@@ -100,7 +100,7 @@ typedef UINT8 tGATT_STATUS;
 #define  GATT_HANDLE_IS_VALID(x) ((x) != 0)
 
 #define GATT_CONN_UNKNOWN                   0
-#define GATT_CONN_NO_RESOURCES              L2CAP_CONN_NO_RESOURCES         /* connection fail for l2cap resource failure */
+#define GATT_CONN_L2C_FAILURE               1                               /* general L2cap failure  */
 #define GATT_CONN_TIMEOUT                   HCI_ERR_CONNECTION_TOUT         /* 0x08 connection timeout  */
 #define GATT_CONN_TERMINATE_PEER_USER       HCI_ERR_PEER_USER               /* 0x13 connection terminate by peer user  */
 #define GATT_CONN_TERMINATE_LOCAL_HOST      HCI_ERR_CONN_CAUSE_LOCAL_HOST   /* 0x16 connectionterminated by local host  */
@@ -137,6 +137,9 @@ typedef UINT16 tGATT_DISCONN_REASON;
     #define GATT_MAX_SCCB       10
 #endif
 
+#ifndef GATTP_TRANSPORT_SUPPORTED
+#define GATTP_TRANSPORT_SUPPORTED        GATT_TRANSPORT_LE_BR_EDR
+#endif
 
 
 /* GATT notification caching timer, default to be three seconds
@@ -164,7 +167,7 @@ typedef UINT16 tGATT_PERM;
 #define GATT_ENCRYPT_KEY_SIZE_MASK  (0xF000) /* the MS nibble of tGATT_PERM; key size 7=0; size 16=9 */
 
 #define GATT_READ_ALLOWED           (GATT_PERM_READ | GATT_PERM_READ_ENCRYPTED | GATT_PERM_READ_ENC_MITM)
-#define GATT_READ_AUTH_REQUIRED     (GATT_PERM_READ_ENC_MITM)
+#define GATT_READ_AUTH_REQUIRED     (GATT_PERM_READ_ENCRYPTED)
 #define GATT_READ_MITM_REQUIRED     (GATT_PERM_READ_ENC_MITM)
 #define GATT_READ_ENCRYPTED_REQUIRED   (GATT_PERM_READ_ENCRYPTED | GATT_PERM_READ_ENC_MITM)
 
@@ -240,6 +243,15 @@ typedef struct
     INT8                exp;
     UINT8               name_spc;   /* The name space of the description */
 } tGATT_CHAR_PRES;
+
+/* Characteristic Report reference Descriptor format
+*/
+typedef struct
+{
+    UINT8              rpt_id;       /* report ID */
+    UINT8              rpt_type;       /* report type */
+} tGATT_CHAR_RPT_REF;
+
 
 #define GATT_VALID_RANGE_MAX_SIZE       16
 typedef struct
@@ -519,12 +531,10 @@ typedef union
     tGATT_INCL_SRVC     incl_service;  /* include service value */
     tGATT_GROUP_VALUE   group_value;   /* Service UUID type.
                                           This field is used with GATT_DISC_SRVC_ALL
+                                          or GATT_DISC_SRVC_BY_UUID
                                           type of discovery result callback. */
 
-    UINT16              handle;        /* When used with GATT_DISC_SRVC_BY_UUID type
-                                          discovery result, it is the ending handle of a
-                                          known service to be discovered. When used with
-                                          GATT_DISC_INC_SRVC type discovery result,
+    UINT16              handle;        /* When used with GATT_DISC_INC_SRVC type discovery result,
                                           it is the included service starting handle.*/
 
     tGATT_CHAR_DCLR_VAL dclr_value;    /* Characteristic declaration value.
@@ -563,7 +573,8 @@ typedef void (tGATT_CONN_CBACK) (tGATT_IF gatt_if, BD_ADDR bda, UINT16 conn_id, 
 /* attribute request callback for ATT server */
 typedef void  (tGATT_REQ_CBACK )(UINT16 conn_id, UINT32 trans_id, tGATTS_REQ_TYPE type, tGATTS_DATA *p_data);
 
-
+/* Define a callback function when encryption is established. */
+typedef void (tGATT_ENC_CMPL_CB)(tGATT_IF gatt_if, BD_ADDR bda);
 
 
 /* Define the structure that applications use to register with
@@ -577,6 +588,7 @@ typedef struct
     tGATT_DISC_RES_CB               *p_disc_res_cb;
     tGATT_DISC_CMPL_CB              *p_disc_cmpl_cb;
     tGATT_REQ_CBACK                 *p_req_cb;
+    tGATT_ENC_CMPL_CB               *p_enc_cmpl_cb;
 } tGATT_CBACK;
 
 /***********************  Start Handle Management Definitions   **********************
@@ -718,6 +730,9 @@ extern "C"
 *******************************************************************************/
     GATT_API extern UINT16 GATTS_CreateService (tGATT_IF gatt_if, tBT_UUID *p_svc_uuid,
                                                 UINT16 svc_inst, UINT16 num_handles, BOOLEAN is_pri);
+
+
+    GATT_API extern BOOLEAN GATTS_RetrieveServiceList(UINT16 **p_l,UINT16* count);
 
 
 /*******************************************************************************
@@ -1044,7 +1059,8 @@ extern "C"
 **
 ** Function         GATT_Connect
 **
-** Description      This function initiate a connecttion to a ATT server.
+** Description      This function initiate a connecttion to a remote device on GATT
+**                  channel.
 **
 ** Parameters       gatt_if: applicaiton interface
 **                  bd_addr: peer device address.
@@ -1060,7 +1076,8 @@ extern "C"
 **
 ** Function         GATT_CancelConnect
 **
-** Description      This function initiate a cancel connecttion to a ATT server.
+** Description      This function terminate the connection initaition to a remote
+**                  device on GATT channel.
 **
 ** Parameters       gatt_if: client interface. If 0 used as unconditionally disconnect,
 **                          typically used for direct connection cancellation.
@@ -1076,7 +1093,8 @@ extern "C"
 **
 ** Function         GATT_Disconnect
 **
-** Description      This function disconnect a logic channel.
+** Description      This function disconnect the GATT channel for this registered
+**                  application.
 **
 ** Parameters       conn_id: connection identifier.
 **
@@ -1119,6 +1137,25 @@ extern "C"
 **
 *******************************************************************************/
     GATT_API extern BOOLEAN GATT_GetConnIdIfConnected(tGATT_IF gatt_if, BD_ADDR bd_addr, UINT16 *p_conn_id);
+
+
+/*******************************************************************************
+**
+** Function         GATT_Listen
+**
+** Description      This function start or stop LE advertisement and listen for
+**                  connection.
+**
+** Parameters       gatt_if: applicaiton interface
+**                  p_bd_addr: listen for specific address connection, or NULL for
+**                             listen to all device connection.
+**                  start: is a direct conenection or a background auto connection
+**
+** Returns          TRUE if advertisement is started; FALSE if adv start failure.
+**
+*******************************************************************************/
+    GATT_API extern BOOLEAN GATT_Listen (tGATT_IF gatt_if, BOOLEAN start, BD_ADDR_PTR bd_addr);
+
 
 #ifdef __cplusplus
 

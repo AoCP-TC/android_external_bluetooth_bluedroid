@@ -28,12 +28,9 @@
 #include "bta_api.h"
 #include "bta_av_int.h"
 
-
-
 #ifndef BTA_AV_RC_PASS_RSP_CODE
 #define BTA_AV_RC_PASS_RSP_CODE     BTA_AV_RSP_NOT_IMPL
 #endif
-
 
 const UINT32  bta_av_meta_caps_co_ids[] = {
     AVRC_CO_METADATA,
@@ -42,7 +39,6 @@ const UINT32  bta_av_meta_caps_co_ids[] = {
 
 /* AVRCP cupported categories */
 #define BTA_AV_RC_SUPF_CT       (AVRC_SUPF_CT_CAT2)
-
 
 /* Added to modify
 **	1. flush timeout
@@ -62,8 +58,18 @@ const UINT16  bta_av_audio_flush_to[] = {
 };     /* AVDTP audio transport channel flush timeout */
 
 /* Note: Android doesnt support AVRC_SUPF_TG_GROUP_NAVI  */
-#define BTA_AV_RC_SUPF_TG       (AVRC_SUPF_TG_CAT1)
+/* Note: if AVRC_SUPF_TG_GROUP_NAVI is set, bta_av_cfg.avrc_group should be TRUE */
+#if AVRC_METADATA_INCLUDED == TRUE
 
+#if AVCT_BROWSE_INCLUDED == TRUE
+#define BTA_AV_RC_SUPF_TG       (AVRC_SUPF_TG_CAT1 | AVRC_SUPF_TG_BROWSE | AVRC_SUPF_TG_APP_SETTINGS)
+#else
+#define BTA_AV_RC_SUPF_TG       (AVRC_SUPF_TG_CAT1 | AVRC_SUPF_TG_APP_SETTINGS)
+#endif
+
+#else
+#define BTA_AV_RC_SUPF_TG       (AVRC_SUPF_TG_CAT1)
+#endif
 
 /*
  * If the number of event IDs is changed in this array, BTA_AV_ NUM_RC_EVT_IDS   also needs to be changed.
@@ -73,43 +79,14 @@ const UINT8  bta_av_meta_caps_evt_ids[] = {
     AVRC_EVT_TRACK_CHANGE,
     AVRC_EVT_PLAY_POS_CHANGED,
     AVRC_EVT_APP_SETTING_CHANGE,
+#if AVCT_BROWSE_INCLUDED == TRUE
+    AVRC_EVT_AVAL_PLAYERS_CHANGE,
+    AVRC_EVT_ADDR_PLAYER_CHANGE,
+#endif
 };
 #ifndef BTA_AV_NUM_RC_EVT_IDS
 #define BTA_AV_NUM_RC_EVT_IDS   (sizeof(bta_av_meta_caps_evt_ids) / sizeof(bta_av_meta_caps_evt_ids[0]))
 #endif /* BTA_AV_NUM_RC_EVT_IDS */
-
-
-#else /* !ANDROID_APP_INCLUDED */
-
-/* Note: if AVRC_SUPF_TG_GROUP_NAVI is set, bta_av_cfg.avrc_group should be TRUE */
-#define BTA_AV_RC_SUPF_TG       (AVRC_SUPF_TG_CAT1)
-
-const UINT16  bta_av_audio_flush_to[] = {
-    120, /* 1 stream  */
-    100, /* 2 streams */
-     80, /* 3 streams */
-     60, /* 4 streams */
-     40  /* 5 streams */
-};     /* AVDTP audio transport channel flush timeout */
-
-
-/*
- * If the number of event IDs is changed in this array, BTA_AV_ NUM_RC_EVT_IDS   also needs to be changed.
- */
-const UINT8  bta_av_meta_caps_evt_ids[] = {
-    AVRC_EVT_PLAY_STATUS_CHANGE,
-    AVRC_EVT_TRACK_CHANGE,
-    AVRC_EVT_TRACK_REACHED_END,
-    AVRC_EVT_TRACK_REACHED_START,
-    AVRC_EVT_PLAY_POS_CHANGED,
-    AVRC_EVT_BATTERY_STATUS_CHANGE,
-    AVRC_EVT_SYSTEM_STATUS_CHANGE,
-    AVRC_EVT_APP_SETTING_CHANGE,
-};
-
-#ifndef BTA_AV_NUM_RC_EVT_IDS
-#define BTA_AV_NUM_RC_EVT_IDS   8
-#endif
 
 #endif /* ANDROID_APP_INCLUDED */
 
@@ -121,7 +98,11 @@ const UINT8  bta_av_meta_caps_evt_ids[] = {
 const tBTA_AV_CFG bta_av_cfg =
 {
     AVRC_CO_BROADCOM,       /* AVRCP Company ID */
+#if AVRC_METADATA_INCLUDED == TRUE
+    512,                    /* AVRCP MTU at L2CAP for control channel */
+#else
     48,                     /* AVRCP MTU at L2CAP for control channel */
+#endif
     BTA_AV_MAX_RC_BR_MTU,   /* AVRCP MTU at L2CAP for browsing channel */
     BTA_AV_RC_SUPF_CT,      /* AVRCP controller categories */
     BTA_AV_RC_SUPF_TG,      /* AVRCP target categories */
@@ -131,7 +112,7 @@ const tBTA_AV_CFG bta_av_cfg =
     6,                      /* AVDTP audio channel max data queue size */
     BTA_AV_MAX_VDP_MTU,     /* AVDTP video transport channel MTU at L2CAP */
     600,                    /* AVDTP video transport channel flush timeout */
-    TRUE,                   /* TRUE, to accept AVRC 1.3 group nevigation command */
+    FALSE,                   /* TRUE, to accept AVRC 1.3 group nevigation command */
     2,                      /* company id count in p_meta_co_ids */
     BTA_AV_NUM_RC_EVT_IDS, /* event id count in p_meta_evt_ids */
     BTA_AV_RC_PASS_RSP_CODE,/* the default response code for pass through commands */
@@ -143,7 +124,7 @@ tBTA_AV_CFG *p_bta_av_cfg = (tBTA_AV_CFG *) &bta_av_cfg;
 
 const UINT16 bta_av_rc_id[] =
 {
-    0x021F, /* bit mask: 0=SELECT, 1=UP, 2=DOWN, 3=LEFT,
+    0x0000, /* bit mask: 0=SELECT, 1=UP, 2=DOWN, 3=LEFT,
                          4=RIGHT, 5=RIGHT_UP, 6=RIGHT_DOWN, 7=LEFT_UP,
                          8=LEFT_DOWN, 9=ROOT_MENU, 10=SETUP_MENU, 11=CONT_MENU,
                          12=FAV_MENU, 13=EXIT */
@@ -155,7 +136,7 @@ const UINT16 bta_av_rc_id[] =
                          8=8, 9=9, 10=DOT, 11=ENTER,
                          12=CLEAR */
 
-    0x0003, /* bit mask: 0=CHAN_UP, 1=CHAN_DOWN, 2=PREV_CHAN, 3=SOUND_SEL,
+    0x0000, /* bit mask: 0=CHAN_UP, 1=CHAN_DOWN, 2=PREV_CHAN, 3=SOUND_SEL,
                          4=INPUT_SEL, 5=DISP_INFO, 6=HELP, 7=PAGE_UP,
                          8=PAGE_DOWN */
 

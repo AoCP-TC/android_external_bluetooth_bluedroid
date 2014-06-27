@@ -133,9 +133,19 @@ tRFC_MCB *rfc_alloc_multiplexer_channel (BD_ADDR bd_addr, BOOLEAN is_initiator)
 {
     int i, j;
     tRFC_MCB *p_mcb = NULL;
+    RFCOMM_TRACE_DEBUG6("rfc_alloc_multiplexer_channel: bd_addr:%02x:%02x:%02x:%02x:%02x:%02x",
+                                bd_addr[0], bd_addr[1], bd_addr[2], bd_addr[3], bd_addr[4], bd_addr[5]);
+    RFCOMM_TRACE_DEBUG1("rfc_alloc_multiplexer_channel:is_initiator:%d", is_initiator);
 
     for (i = 0; i < MAX_BD_CONNECTIONS; i++)
     {
+        RFCOMM_TRACE_DEBUG2("rfc_alloc_multiplexer_channel rfc_cb.port.rfc_mcb[%d].state:%d",
+                            i, rfc_cb.port.rfc_mcb[i].state);
+        RFCOMM_TRACE_DEBUG6("(rfc_cb.port.rfc_mcb[i].bd_addr:%02x:%02x:%02x:%02x:%02x:%02x",
+                                rfc_cb.port.rfc_mcb[i].bd_addr[0], rfc_cb.port.rfc_mcb[i].bd_addr[1],
+                                rfc_cb.port.rfc_mcb[i].bd_addr[2], rfc_cb.port.rfc_mcb[i].bd_addr[3],
+                                rfc_cb.port.rfc_mcb[i].bd_addr[4], rfc_cb.port.rfc_mcb[i].bd_addr[5]);
+
         if ((rfc_cb.port.rfc_mcb[i].state != RFC_MX_STATE_IDLE)
          && (!memcmp (rfc_cb.port.rfc_mcb[i].bd_addr, bd_addr, BD_ADDR_LEN)))
         {
@@ -143,6 +153,8 @@ tRFC_MCB *rfc_alloc_multiplexer_channel (BD_ADDR bd_addr, BOOLEAN is_initiator)
             /* If there was an inactivity timer running stop it now */
             if (rfc_cb.port.rfc_mcb[i].state == RFC_MX_STATE_CONNECTED)
                 rfc_timer_stop (&rfc_cb.port.rfc_mcb[i]);
+            RFCOMM_TRACE_DEBUG3("rfc_alloc_multiplexer_channel:is_initiator:%d, found, state:%d, p_mcb:%p",
+                                is_initiator, rfc_cb.port.rfc_mcb[i].state, &rfc_cb.port.rfc_mcb[i]);
             return (&rfc_cb.port.rfc_mcb[i]);
         }
     }
@@ -159,6 +171,8 @@ tRFC_MCB *rfc_alloc_multiplexer_channel (BD_ADDR bd_addr, BOOLEAN is_initiator)
             /* New multiplexer control block */
             memset (p_mcb, 0, sizeof (tRFC_MCB));
             memcpy (p_mcb->bd_addr, bd_addr, BD_ADDR_LEN);
+            RFCOMM_TRACE_DEBUG3("rfc_alloc_multiplexer_channel:is_initiator:%d, create new p_mcb:%p, index:%d",
+                                is_initiator, &rfc_cb.port.rfc_mcb[j], j);
 
             GKI_init_q(&p_mcb->cmd_q);
 
@@ -364,7 +378,7 @@ void rfc_port_closed (tPORT *p_port)
 {
     tRFC_MCB *p_mcb = p_port->rfc.p_mcb;
 
-    RFCOMM_TRACE_DEBUG0 ("rfc_port_closed");
+    RFCOMM_TRACE_WARNING0 ("rfc_port_closed");
 
     rfc_port_timer_stop (p_port);
 
@@ -400,7 +414,7 @@ void rfc_inc_credit (tPORT *p_port, UINT8 credit)
     {
         p_port->credit_tx += credit;
 
-        RFCOMM_TRACE_EVENT1 ("rfc_inc_credit:%d", p_port->credit_tx);
+        RFCOMM_TRACE_WARNING1 ("rfc_inc_credit:%d", p_port->credit_tx);
 
         if (p_port->tx.peer_fc == TRUE)
             PORT_FlowInd(p_port->rfc.p_mcb, p_port->dlci, TRUE);
@@ -424,6 +438,7 @@ void rfc_dec_credit (tPORT *p_port)
     {
         if (p_port->credit_tx > 0)
             p_port->credit_tx--;
+        RFCOMM_TRACE_WARNING1 ("rfc_dec_credit:%d", p_port->credit_tx);
 
         if (p_port->credit_tx == 0)
             p_port->tx.peer_fc = TRUE;
